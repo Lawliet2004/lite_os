@@ -28,4 +28,29 @@ Not implemented yet:
 - physical memory zones
 - reclaim policy
 - kernel heap
-- virtual memory manager
+- full virtual memory manager
+
+## Virtual Memory
+
+Phase 4 starts the x86_64 VMM by operating on the active kernel page table
+provided by Limine.
+
+Implemented:
+
+- active CR3 discovery
+- HHDM-backed page-table access
+- `vmm_map()`
+- `vmm_unmap()`
+- `vmm_protect()`
+- `vmm_virt_to_phys()`
+- boot-time self-test that maps one PMM page at a reserved kernel virtual test
+  address, writes and reads through it, changes permissions, unmaps it, and
+  verifies translation fails after unmap
+
+Not implemented yet:
+
+- separate user address spaces
+- recursive freeing of page-table pages
+- user pointer validation
+- demand paging
+- copy-on-write

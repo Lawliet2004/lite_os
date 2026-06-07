@@ -16,10 +16,11 @@ Phase 0/1 includes:
 - PIT timer interrupts
 - minimal keyboard IRQ acknowledgement
 - bitmap physical memory manager
+- kernel virtual-memory map/unmap helpers
 
 Not implemented yet:
 
-- virtual memory manager
+- user address spaces
 - scheduler
 - user mode
 - syscalls

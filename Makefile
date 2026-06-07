@@ -38,6 +38,7 @@ C_SOURCES := \
 	kernel/arch/x86_64/interrupt/idt.c \
 	kernel/arch/x86_64/interrupt/interrupt.c \
 	kernel/arch/x86_64/interrupt/pic.c \
+	kernel/arch/x86_64/memory/vmm.c \
 	kernel/drivers/pit.c \
 	kernel/mm/pmm.c \
 	kernel/core/init.c \

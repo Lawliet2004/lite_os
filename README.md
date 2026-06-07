@@ -24,6 +24,8 @@ CPU-exception path:
 - minimal keyboard IRQ acknowledgement
 - bitmap physical memory manager with 4 KiB pages
 - PMM self-test using 10,000 page allocations
+- kernel page-table map/unmap/protect/translate helpers
+- VMM self-test using a PMM-backed virtual mapping
 - QEMU and ISO helper scripts
 
 It does not implement a scheduler, user mode, ELF loading, syscalls, VFS,
@@ -100,6 +102,8 @@ PMM: initialized
 PMM: total=... KiB usable=... KiB free=... KiB reserved=... KiB
 PMM: bitmap=... bytes at phys=...
 PMM: self-test passed (10000 pages)
+VMM: initialized
+VMM: self-test passed
 PIC: remapped
 PIT: initialized at 100 Hz
 Timer: ticks observed (...)
@@ -125,6 +129,5 @@ The kernel should print CPU exception diagnostics and then panic.
 
 ## Next Step
 
-Phase 4 is the virtual memory manager. Start with explicit page-table helpers,
-kernel/user permission flags, `vmm_map()`, `vmm_unmap()`, and guarded user
-pointer validation.
+Continue Phase 4 by adding standalone address-space creation/destruction and
+guarded user pointer validation helpers. Phase 5 is the kernel heap.

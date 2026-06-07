@@ -3,6 +3,7 @@
 #include <arch/x86_64/idt.h>
 #include <arch/x86_64/limine.h>
 #include <arch/x86_64/pic.h>
+#include <arch/x86_64/vmm.h>
 #include <drivers/pit.h>
 #include <drivers/serial.h>
 #include <drivers/vga_text.h>
@@ -101,6 +102,10 @@ void kernel_main(void)
     printk("PMM: initialized\n");
     pmm_print_stats();
     pmm_self_test();
+
+    vmm_init(hhdm_request.response->offset);
+    printk("VMM: initialized\n");
+    vmm_self_test();
 
     pic_remap();
     pic_mask_all();
