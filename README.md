@@ -38,6 +38,8 @@ level by level, with each level backed by explicit test programs and serial-log
 evidence. See [docs/linux-compat.md](docs/linux-compat.md) and
 [docs/syscall-roadmap.md](docs/syscall-roadmap.md).
 
+The full project roadmap is tracked in [docs/roadmap.md](docs/roadmap.md).
+
 ## Prerequisites
 
 Install:
