@@ -2,15 +2,56 @@
 
 This matrix documents the verification status of various Linux userspace programs and test suites under LiteNix. It is updated at each phase to honestly track what works, what fails, and what is missing.
 
-## Compatibility Matrix
+## Phase 1 Baseline
 
-| Program / Test Suite | Binary Type | Build Method | Status | Missing Syscalls / Features | Crash/Panic Status | Last Verified |
-|----------------------|-------------|--------------|--------|-----------------------------|--------------------|---------------|
-| **Raw Syscall Suite** (`/tests/test_all`) | Static ELF64 (no libc) | `tests/userspace/raw-syscall/*.c` compiled with no libc, custom entry | **PASS** | None | None | Phase 2 Baseline |
-| **Static Musl Hello** (`/bin/hello_musl`) | Static ELF64 (musl) | `zig cc -target x86_64-linux-musl -static hello_musl.c` | **PASS** | None (uses `writev`, `exit_group`, `readv`) | None | Phase 3 Baseline |
-| **Static BusyBox** | Static ELF64 (musl) | Precompiled static BusyBox | *Target (Phase 5/6)* | Process groups, signals, full fd inheritance, `statx` completeness | N/A | Not Yet Tested |
-| **Dynamic Musl Hello** | Dynamic ELF64 | `zig cc -target x86_64-linux-musl hello_musl.c` | *Target (Phase 5)* | `PT_INTERP` loader, auxiliary vectors, file-backed `mmap` | N/A | Not Yet Tested |
-| **BusyBox Shell** | Static ELF64 (musl) | Static musl compilation | *Target (Phase 6)* | Terminals, job control, signals | N/A | Not Yet Tested |
+**Build Environment:**
+- clang (--target=x86_64-elf)
+- ld.lld
+- nasm
+- xorriso
+- qemu-system-x86_64
+- make, python3, gcc
+
+**Verification:** `make verify-boot` PASS (2026-06-08)
+
+**Test Suite Results (all 19 tests PASSED):**
+
+| # | Test | Evidence String |
+|---|------|-----------------|
+| 1 | Reading /hello.txt | `Test 1: PASSED` |
+| 2 | VFS / stat / open / read / close | `Test 2: PASSED` |
+| 3 | VFS directory listing | `Test 3: PASSED` |
+| 4 | Independent file descriptor offsets | `Test 4: PASSED` |
+| 5 | Virtual devices under /dev | `Test 5: PASSED` |
+| 6 | Minimal procfs | `Test 6: PASSED` |
+| 7 | fork and wait4 | `Test 7: PASSED` |
+| 8 | getpid / getppid | `Test 8: PASSED` |
+| 9 | O_TRUNC and O_APPEND | `Test 9: PASSED` |
+| 10 | dup / dup2 | `Test 10: PASSED` |
+| 11 | mkdir / unlink | `Test 11: PASSED` |
+| 12 | clone / futex | `Test 12: PASSED` |
+| 13 | lazy anonymous mmap / munmap | `Test 13: PASSED` |
+| 14 | pipes / poll | `Test 14: PASSED` |
+| 15 | clock_gettime / gettimeofday / sleep | `Test 15: PASSED` |
+| 16 | EXT2 and tmpfs | `Test 16: PASSED` |
+| 17 | socket creation / binding | `Test 17: PASSED` |
+| 18 | static musl hello world | `Hello from musl!` + `Test 18: PASSED` |
+| 19 | Bad executable / pointer rejection | `Test 19: PASSED` |
+
+**No CPU exceptions** outside expected user-space negative tests.
+**No kernel panics.**
+
+For machine-readable scoreboard, see [compatibility_scoreboard.csv](./compatibility_scoreboard.csv).
+
+## Compatibility Scoreboard
+
+| Binary Name | Static/Dynamic | Libc Type | Required Syscalls | Pass/Fail | Last Verified Date | Serial Log Evidence |
+|-------------|----------------|-----------|-------------------|-----------|--------------------|---------------------|
+| **Raw Syscall Suite** (`test_all`) | Static | None (Direct) | `write`, `exit_group`, `openat`, `read`, `close`, `newfstatat`, `brk`, `mmap`, `munmap`, `getpid`, `gettid`, `uname`, `clock_gettime`, `nanosleep`, `getrandom` | **PASS** | 2026-06-08 | `RAWSYSCALL: all tests passed` |
+| **Static Musl Hello** (`hello_musl`) | Static | musl | `writev`, `exit_group`, `readv` | **PASS** | 2026-06-08 | `Hello from musl!\nargc = 3\nargv[0] = /bin/hello_musl` |
+| **Static BusyBox** | Static | musl | `chmod`, `fchmod`, `chown`, `statx`, `ioctl`, process groups, signals | **Fail (Target)** | 2026-06-08 | N/A (Blocked by Phase 5 syscalls) |
+| **Dynamic Musl Hello** | Dynamic | musl | `mmap` (file-backed), `PT_INTERP` loader, auxiliary vectors | **Fail (Target)** | 2026-06-08 | N/A (Blocked by Phase 4 ELF improvements) |
+| **BusyBox Shell** | Static | musl | `setsid`, `setpgid`, TTY line discipline, signal frame delivery | **Fail (Target)** | 2026-06-08 | N/A (Blocked by Phase 6 terminal / signals) |
 
 ---
 

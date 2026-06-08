@@ -1,0 +1,13 @@
+binary_name,static_dynamic,libc_type,required_syscalls,pass_fail,last_verified,serial_evidence
+test_all,Static,None (Direct syscalls),write;exit_group;openat;read;close;newfstatat;brk;mmap;munmap;getpid;gettid;uname;clock_gettime;nanosleep;getrandom,PASS,2026-06-08,"RAWSYSCALL: all tests passed"
+hello_musl,Static,musl,writev;exit_group;readv,PASS,2026-06-08,"Hello from musl! argc = 3 argv[0] = /bin/hello_musl"
+test_write_exit,Static,None (Direct syscalls),write;exit_group,PASS,2026-06-08,test_write_exit marker in serial.log
+test_read,Static,None (Direct syscalls),read;close;exit_group,PASS,2026-06-08,test_read marker in serial.log
+test_stat,Static,None (Direct syscalls),newfstatat;write;exit_group,PASS,2026-06-08,test_stat marker in serial.log
+test_mmap,Static,None (Direct syscalls),mmap;munmap;write;exit_group,PASS,2026-06-08,test_mmap marker in serial.log
+test_process,Static,None (Direct syscalls),fork;wait4;getpid;exit_group,PASS,2026-06-08,test_process marker in serial.log
+test_clock,Static,None (Direct syscalls),clock_gettime;write;exit_group,PASS,2026-06-08,test_clock marker in serial.log
+test_getrandom,Static,None (Direct syscalls),getrandom;write;exit_group,PASS,2026-06-08,test_getrandom marker in serial.log
+dynamic_musl_hello,Dynamic,musl,mmap (file-backed);PT_INTERP;auxiliary vectors,FAIL,2026-06-08,N/A - Blocked by Phase 4 ELF improvements
+static_busybox,Static,musl,chmod;fchmod;chown;statx;ioctl;process groups;signals,FAIL,2026-06-08,N/A - Blocked by Phase 5 syscalls
+busybox_shell,Static,musl,setsid;setpgid;TTY line discipline;signal frame delivery,FAIL,2026-06-08,N/A - Blocked by Phase 6 terminal/signals

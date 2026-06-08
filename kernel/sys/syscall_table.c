@@ -4,6 +4,153 @@
 #include <sched/task.h>
 
 /* ------------------------------------------------------------------ */
+/* Human-readable syscall name lookup                                  */
+/* ------------------------------------------------------------------ */
+
+static __attribute__((unused)) const char *syscall_name(unsigned nr)
+{
+    switch (nr) {
+    /* ---- File I/O ---- */
+    case SYS_read:       return "read";
+    case SYS_write:      return "write";
+    case SYS_readv:      return "readv";
+    case SYS_writev:     return "writev";
+    case SYS_open:       return "open";
+    case SYS_openat:     return "openat";
+    case SYS_close:      return "close";
+    case SYS_stat:       return "stat";
+    case SYS_lstat:      return "lstat";
+    case SYS_fstat:      return "fstat";
+    case SYS_newfstatat: return "newfstatat";
+    case SYS_lseek:      return "lseek";
+    case SYS_ioctl:      return "ioctl";
+    case SYS_dup:        return "dup";
+    case SYS_dup2:       return "dup2";
+    case SYS_fcntl:      return "fcntl";
+    case SYS_getdents64: return "getdents64";
+    case SYS_access:     return "access";
+    case SYS_faccessat:  return "faccessat";
+    case SYS_readlink:   return "readlink";
+    case SYS_readlinkat: return "readlinkat";
+    case SYS_statx:      return "statx";
+    case SYS_rename:     return "rename";
+    case SYS_mkdir:      return "mkdir";
+    case SYS_rmdir:      return "rmdir";
+    case SYS_unlink:     return "unlink";
+    case SYS_chdir:      return "chdir";
+    case SYS_getcwd:     return "getcwd";
+
+    /* ---- Memory ---- */
+    case SYS_mmap:       return "mmap";
+    case SYS_mprotect:   return "mprotect";
+    case SYS_munmap:     return "munmap";
+    case SYS_brk:        return "brk";
+
+    /* ---- Process ---- */
+    case SYS_getpid:     return "getpid";
+    case SYS_gettid:     return "gettid";
+    case SYS_getppid:    return "getppid";
+    case SYS_getuid:     return "getuid";
+    case SYS_getgid:     return "getgid";
+    case SYS_geteuid:    return "geteuid";
+    case SYS_getegid:    return "getegid";
+    case SYS_fork:       return "fork";
+    case SYS_execve:     return "execve";
+    case SYS_exit:       return "exit";
+    case SYS_exit_group: return "exit_group";
+    case SYS_wait4:      return "wait4";
+    case SYS_clone:      return "clone";
+    case SYS_arch_prctl: return "arch_prctl";
+    case SYS_set_tid_address: return "set_tid_address";
+
+    /* ---- Signals ---- */
+    case SYS_rt_sigaction:  return "rt_sigaction";
+    case SYS_rt_sigprocmask: return "rt_sigprocmask";
+    case SYS_kill:          return "kill";
+
+    /* ---- Threads & Sync ---- */
+    case SYS_futex:         return "futex";
+    case SYS_set_robust_list:  return "set_robust_list";
+    case SYS_get_robust_list:  return "get_robust_list";
+    case SYS_getrandom:     return "getrandom";
+
+    /* ---- Pipes & Poll ---- */
+    case SYS_pipe:          return "pipe";
+    case SYS_pipe2:         return "pipe2";
+    case SYS_poll:          return "poll";
+
+    /* ---- Time ---- */
+    case SYS_clock_gettime:  return "clock_gettime";
+    case SYS_gettimeofday:   return "gettimeofday";
+    case SYS_nanosleep:      return "nanosleep";
+    case SYS_uname:          return "uname";
+    case SYS_getrlimit:      return "getrlimit";
+    case SYS_prlimit64:      return "prlimit64";
+
+    /* ---- Sockets ---- */
+    case SYS_socket:       return "socket";
+    case SYS_connect:      return "connect";
+    case SYS_accept:       return "accept";
+    case SYS_sendto:       return "sendto";
+    case SYS_recvfrom:     return "recvfrom";
+    case SYS_bind:         return "bind";
+    case SYS_listen:       return "listen";
+
+    default:               return "unknown";
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* Human-readable errno name lookup                                    */
+/* ------------------------------------------------------------------ */
+
+static __attribute__((unused)) const char *errno_name(int64_t err)
+{
+    /* err is the negative errno value returned by the syscall */
+    switch (-err) {
+    case EPERM:       return "EPERM";
+    case ENOENT:      return "ENOENT";
+    case ESRCH:       return "ESRCH";
+    case EINTR:       return "EINTR";
+    case EIO:         return "EIO";
+    case ENXIO:       return "ENXIO";
+    case E2BIG:       return "E2BIG";
+    case EBADF:       return "EBADF";
+    case ECHILD:      return "ECHILD";
+    case ENOMEM:      return "ENOMEM";
+    case EACCES:      return "EACCES";
+    case EFAULT:      return "EFAULT";
+    case ENOTBLK:     return "ENOTBLK";
+    case EBUSY:       return "EBUSY";
+    case EEXIST:      return "EEXIST";
+    case EXDEV:       return "EXDEV";
+    case ENODEV:      return "ENODEV";
+    case ENOTDIR:     return "ENOTDIR";
+    case EISDIR:      return "EISDIR";
+    case EINVAL:      return "EINVAL";
+    case ENFILE:      return "ENFILE";
+    case EMFILE:      return "EMFILE";
+    case ENOSPC:      return "ENOSPC";
+    case EPIPE:       return "EPIPE";
+    case ERANGE:      return "ERANGE";
+    case ENOSYS:      return "ENOSYS";
+    case ENOTEMPTY:   return "ENOTEMPTY";
+    case ELOOP:       return "ELOOP";
+    case ENAMETOOLONG: return "ENAMETOOLONG";
+    case EAGAIN:      return "EAGAIN";
+    case ENOEXEC:     return "ENOEXEC";
+    case EOVERFLOW:   return "EOVERFLOW";
+    case ENOTSOCK:    return "ENOTSOCK";
+    case EDESTADDRREQ: return "EDESTADDRREQ";
+    case 95:          return "EOPNOTSUPP/ENOTSUP";  /* EOPNOTSUPP == ENOTSUP == 95 */
+    case EAFNOSUPPORT: return "EAFNOSUPPORT";
+    case EISCONN:     return "EISCONN";
+    case ENOTCONN:    return "ENOTCONN";
+    default:          return "EUNKNOWN";
+    }
+}
+
+/* ------------------------------------------------------------------ */
 /* Forward declarations of all syscall handlers                        */
 /* ------------------------------------------------------------------ */
 
@@ -209,9 +356,23 @@ int64_t syscall_dispatch(struct syscall_frame *frame)
     }
 
 #ifdef SYSCALL_TRACE
-    if (nr != SYS_write) { /* suppress write spam */
+    if (nr != SYS_write) { /* suppress write spam for the brief line */
         printk("syscall: nr=%llu ret=%lld\n",
                (unsigned long long)nr, (long long)ret);
+    }
+    /* Second diagnostic line: only when ret < 0 (failed syscall) */
+    if (ret < 0) {
+        printk("syscall: nr=%llu name=%s args=(rdi=%llx rsi=%llx rdx=%llx r10=%llx r8=%llx r9=%llx) ret=%lld errno=%s\n",
+               (unsigned long long)nr,
+               syscall_name(nr),
+               (unsigned long long)frame->rdi,
+               (unsigned long long)frame->rsi,
+               (unsigned long long)frame->rdx,
+               (unsigned long long)frame->r10,
+               (unsigned long long)frame->r8,
+               (unsigned long long)frame->r9,
+               (long long)ret,
+               errno_name(ret));
     }
 #endif
 
