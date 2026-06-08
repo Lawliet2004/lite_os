@@ -95,10 +95,10 @@ isr_common:
     push rax
 
     mov rdi, rsp
-    mov r12, rsp
+    mov r15, rsp
     and rsp, -16
     call exception_dispatch
-    mov rsp, r12
+    mov rsp, r15
 
     pop rax
     pop rbx
@@ -137,10 +137,10 @@ irq_common:
     push rax
 
     mov rdi, rsp
-    mov r12, rsp
+    mov r15, rsp
     and rsp, -16
     call irq_dispatch
-    mov rsp, r12
+    mov rsp, r15
 
     pop rax
     pop rbx

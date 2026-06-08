@@ -5,10 +5,12 @@
 #include <stddef.h>
 #include <stdint.h>
 
+extern void kmsg_put_char(char ch);
 static void put_char(char ch)
 {
     serial_write_char(ch);
     vga_text_write_char(ch);
+    kmsg_put_char(ch);
 }
 
 static void put_string(const char *text)

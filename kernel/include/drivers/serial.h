@@ -7,5 +7,7 @@ void serial_init(void);
 bool serial_is_initialized(void);
 void serial_write_char(char ch);
 void serial_write_string(const char *text);
+bool serial_has_char(void);
+char serial_read_char(void);
 
 #endif

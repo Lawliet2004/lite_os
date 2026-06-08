@@ -27,7 +27,7 @@ struct tss64 {
     uint16_t iomap_base;
 } PACKED;
 
-static uint64_t gdt[5];
+static uint64_t gdt[7];
 static struct tss64 tss;
 static uint8_t kernel_rsp0_stack[16384] __attribute__((aligned(16)));
 static uint8_t double_fault_stack[16384] __attribute__((aligned(16)));
@@ -61,6 +61,11 @@ static void set_tss_descriptor(uint64_t base, uint32_t limit)
     gdt[4] = base >> 32;
 }
 
+void tss_set_rsp0(uint64_t rsp0)
+{
+    tss.rsp0 = rsp0;
+}
+
 void gdt_init(void)
 {
     tss.rsp0 = (uint64_t)(kernel_rsp0_stack + sizeof(kernel_rsp0_stack));
@@ -68,9 +73,11 @@ void gdt_init(void)
     tss.iomap_base = sizeof(tss);
 
     gdt[0] = 0;
-    gdt[1] = 0x00AF9A000000FFFFULL;
-    gdt[2] = 0x00AF92000000FFFFULL;
-    set_tss_descriptor((uint64_t)&tss, sizeof(tss) - 1);
+    gdt[1] = 0x00AF9A000000FFFFULL; /* kernel code, DPL=0, long mode */
+    gdt[2] = 0x00AF92000000FFFFULL; /* kernel data, DPL=0 */
+    set_tss_descriptor((uint64_t)&tss, sizeof(tss) - 1); /* gdt[3..4] */
+    gdt[5] = 0x00AFF2000000FFFFULL; /* user data,   DPL=3 */
+    gdt[6] = 0x00AFFA000000FFFFULL; /* user code,   DPL=3, long mode */
 
     const struct gdtr gdtr = {
         .limit = sizeof(gdt) - 1,

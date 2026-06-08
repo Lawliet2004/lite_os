@@ -57,3 +57,18 @@ void serial_write_string(const char *text)
         serial_write_char(*text++);
     }
 }
+
+bool serial_has_char(void)
+{
+    if (!initialized) return false;
+    return (inb(SERIAL_LINE_STATUS_PORT(COM1_PORT)) & 0x01) != 0;
+}
+
+char serial_read_char(void)
+{
+    if (!initialized) return 0;
+    while (!serial_has_char()) {
+        __asm__ volatile ("pause");
+    }
+    return (char)inb(SERIAL_DATA_PORT(COM1_PORT));
+}
