@@ -2,7 +2,7 @@
 #include <kernel/printk.h>
 #include <stdarg.h>
 
-void (*panic_hook)(void) = 0;
+void (*volatile panic_hook)(void) = 0;
 
 NORETURN void panic_at(const char *file, int line, const char *fmt, ...)
 {

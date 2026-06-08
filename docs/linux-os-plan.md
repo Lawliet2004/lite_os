@@ -22,60 +22,23 @@ and compatibility tests all agree.
 
 | Phase | Status | Missing Work |
 | --- | --- | --- |
-| 0-5 | Mostly implemented | Keep build and boot verification reproducible on Windows and Unix hosts. |
-| 6-8 | Mostly implemented | Keep scheduler/syscall tests in CI; remove stale duplicate syscall code. |
-| 9-10 | Implemented for custom ELF tests | Expand ELF validation, auxv, static musl entry assumptions, and failure cleanup tests. |
-| 11-13 | Partially implemented | Improve VFS path semantics, fd behavior, procfs accuracy, and device/TTY behavior. |
-| 14 | Partial | Add memory pressure behavior, reclaimable caches, shared zero page, and eventually COW. |
-| 15 | Partial | Harden fork/exec/wait, fd inheritance, process groups, sessions, and exit-group semantics. |
-| 16 | Partial | Deliver user signal handlers, signal frames, restorer path, SIGCHLD/SIGINT behavior, and masks per thread. |
-| 17 | Partial | Complete robust futex support, TLS/thread teardown, and pthread compatibility. |
-| 18 | Partial | Finish MAP_FIXED rules, file-backed mmap, VMA overlap checks, mremap later, and malloc stress tests. |
-| 19 | Partial | Maintain a tested binary matrix with exact pass/fail notes. |
-| 20 | Partial | Make init run shell by default after tests, add login/session behavior later. |
-| 21 | Partial | Add select and epoll; harden pipe close, blocking, and nonblocking edge cases. |
-| 22 | Partial | Add RTC-backed wall clock, timer precision, interruption behavior, and timeout-aware waits. |
-| 23 | Partial | Add persistent block storage, mount table, tmpfs semantics, ext2 coverage, and page cache later. |
-| 24 | Partial | Stabilize virtio-net, ARP/IP/ICMP/UDP/TCP, add DNS userspace support, and test host networking. |
-| 25 | Not proven | Run and document VirtualBox boot, storage, keyboard, network, and serial workflows. |
-| 26 | Partial | Add kernel log discipline, stack traces, syscall tracing controls, and crash reports. |
-| 27 | Partial | Audit hostile-userspace boundaries, integer overflow, usercopy, fd bounds, and permissions. |
-| 28 | Not implemented | Track boot time, memory use, syscall cost, context switch cost, and RAM budgets. |
-| 29 | Partial | Add kernel unit tests, userspace compatibility tests, and repeatable QEMU CI. |
-| 30 | Process rule | Every phase change needs implementation notes, invariants, build, boot, and known limits. |
+| **Phase 0: Stability Baseline** | **Completed** | Stable build & verification script active. |
+| **Phase 1: Linux Syscall Foundation** | **Completed** | Syscall table is compatible; negative errno returned; user pointer checks added. |
+| **Phase 2: VFS Maturity** | **Completed** | Initramfs, devfs, procfs, ext2, and fd features verified. |
+| **Phase 3: ELF Loader & Static Programs** | **Completed** | Static musl hello runs with correct argv/envp passing, and execve invalid inputs are rejected safely. |
+| **Phase 4: mmap & Dynamic Prerequisites** | *In Progress* | VMA list per process, file-backed mmap, and page fault handling. |
+| **Phase 5: Dynamic Linker Support** | *Planned* | PT_INTERP loading and dynamic Musl hello world. |
 
 ## Immediate Work Queue
 
-1. Stabilize current build and boot verification on the development host.
-2. Bring L1 syscall coverage up: openat, newfstatat, gettid, uname, robust-list stubs, getrandom, readlink, access/faccessat, prlimit64, and statx stubs where safe.
-3. Build and run static no-libc Linux ABI tests outside libc-lite.
-4. Attempt static musl hello world, record every missing syscall, and implement only the calls required by the evidence.
-5. Attempt static BusyBox with a small command matrix.
-6. Harden shell usability: terminal input, pipes, child process control, signals, and procfs.
-7. Prove VirtualBox boot and networking with documented serial logs.
+1. Maintain stable build and boot verification matrix on host.
+2. Complete file-backed `mmap` and VMA tracking (Phase 4).
+3. Test dynamic musl binaries (Phase 5).
+4. Expand signals and process group compatibility (Phase 6).
 
 ## Current Slice
 
-The first compatibility slice adds Linux syscall numbers and handlers for:
-
-- `openat`
-- `newfstatat`
-- `gettid`
-- `uname`
-- `set_robust_list`
-- `get_robust_list`
-
-The second compatibility slice adds minimal handlers for:
-
-- `access`
-- `faccessat`
-- `readlink`
-- `readlinkat`
-- `statx`
-- `getrandom`
-- `getrlimit`
-- `prlimit64`
-
-These are foundational for static libc programs. They do not complete robust
-futex recovery, directory-FD-relative path lookup, symbolic links, writable
-resource limits, dynamic linking, or full Linux application compatibility.
+The third compatibility slice completes Phase 3 by:
+- Correctly parsing and passing `argc`, `argv`, and `envp` onto the user stack for static musl program execution.
+- Standardizing the `sys_execve` error cases (`-EFAULT`, `-ENOENT`, `-EACCES`, `-ENOEXEC`) and validating all user inputs.
+- Verifying the boot output and checking rejection constraints via userspace integration tests.

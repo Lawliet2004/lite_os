@@ -5,7 +5,7 @@
 
 NORETURN void panic_at(const char *file, int line, const char *fmt, ...);
 
-extern void (*panic_hook)(void);
+extern void (*volatile panic_hook)(void);
 
 #define panic(...) panic_at(__FILE__, __LINE__, __VA_ARGS__)
 

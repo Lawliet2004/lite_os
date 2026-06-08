@@ -85,8 +85,17 @@ void syscall_init(void)
                      : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx)
                      : "a"(7), "c"(0));
 
+    /* Enable SSE in CR0 and CR4 */
+    uint64_t cr0;
+    __asm__ volatile("mov %%cr0, %0" : "=r"(cr0));
+    cr0 &= ~(1ULL << 2);  /* Clear EM (coprocessor emulation) */
+    cr0 |= (1ULL << 1);   /* Set MP (monitor coprocessor) */
+    __asm__ volatile("mov %0, %%cr0" :: "r"(cr0) : "memory");
+
     uint64_t cr4;
     __asm__ volatile("mov %%cr4, %0" : "=r"(cr4));
+    cr4 |= (1ULL << 9);   /* Set OSFXSR */
+    cr4 |= (1ULL << 10);  /* Set OSXMMEXCPT */
 
     if (ebx & (1U << 7)) {
         cr4 |= (1ULL << 20); /* Enable SMEP */

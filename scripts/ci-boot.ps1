@@ -10,14 +10,17 @@
 
 $ErrorActionPreference = 'Stop'
 
+# Ensure MSYS2/Clang64/UCRT64 tools are in the PATH
+$env:PATH = "C:\msys64\usr\bin;C:\msys64\ucrt64\bin;C:\msys64\clang64\bin;" + $env:PATH
+
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
 $RootDir = Resolve-Path (Join-Path $ScriptDir '..')
 Set-Location $RootDir
 
-$Timestamp = (Get-Date -AsUTC).ToString('yyyy-MM-ddTHH:mm:ssZ')
+$Timestamp = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
 Write-Host "[ci-boot] starting boot verification matrix at $Timestamp"
 
-$logPath = Join-Path $RootDir 'build' 'ci-boot.log'
+$logPath = "$RootDir\ci-boot-temp.log"
 New-Item -ItemType Directory -Path (Split-Path $logPath) -Force | Out-Null
 
 # Run each verification mode separately so we can show a clean per-mode status.
@@ -47,7 +50,7 @@ Invoke-BootCheck -Label 'verify-boot'      -Target 'verify-boot'
 Invoke-BootCheck -Label 'verify-boot-vmm'  -Target 'verify-boot-vmm'
 Invoke-BootCheck -Label 'verify-boot-heap' -Target 'verify-boot-heap'
 
-$EndTs = (Get-Date -AsUTC).ToString('yyyy-MM-ddTHH:mm:ssZ')
+$EndTs = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
 if ($failures.Count -gt 0) {
     Write-Host "[ci-boot] FAILED ($($failures -join ', ')) at $EndTs" -ForegroundColor Red
     exit 1

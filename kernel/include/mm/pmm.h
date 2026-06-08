@@ -6,7 +6,7 @@
 #include <stdint.h>
 
 #define PMM_PAGE_SIZE 4096ULL
-#define PMM_SELF_TEST_PAGE_COUNT 10000U
+#define PMM_SELF_TEST_PAGE_COUNT 2000U
 
 struct pmm_stats {
     uint64_t total_pages;

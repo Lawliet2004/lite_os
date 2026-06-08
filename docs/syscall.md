@@ -64,6 +64,9 @@ All syscall handlers return `int64_t`:
 | `newfstatat`   | 262 | ✅ Full   | AT_FDCWD + AT_EMPTY_PATH |
 | `statx`        | 332 | ✅ Full   | STATX_BASIC_STATS |
 | `execve`       | 59  | ✅ Full   | ELF loader |
+| `readv`        | 19  | ✅ Full   | Vectored read support |
+| `writev`       | 20  | ✅ Full   | Vectored write support |
+
 
 ### Process (`sys_exit.c`, `sys_process.c`)
 

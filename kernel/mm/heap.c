@@ -586,6 +586,7 @@ void heap_self_test(void)
         heap_panic_occurred = false;
         heap_panic_expected = true;
         panic_hook = heap_panic_hook_fn;
+        printk("[heap] panic_hook set to %p (fn=%p)\n", panic_hook, heap_panic_hook_fn);
         if (ltenix_setjmp(heap_panic_env) == 0) {
             kfree(p_double);
             kfree(p_double);

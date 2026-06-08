@@ -40,9 +40,195 @@
 #define STATX_BLOCKS      0x00000400U
 #define STATX_BASIC_STATS 0x000007ffU
 
-/* ------------------------------------------------------------------ */
-/* Helpers                                                              */
-/* ------------------------------------------------------------------ */
+struct iovec {
+    void *iov_base;
+    size_t iov_len;
+};
+
+int64_t sys_readv(struct syscall_frame *frame)
+{
+    int fd = (int)frame->rdi;
+    const struct iovec *iov = (const struct iovec *)frame->rsi;
+    int iovcnt = (int)frame->rdx;
+
+    if (current_task == 0 || current_task->process == 0) return -(int64_t)EPERM;
+    struct process *proc = current_task->process;
+
+    if (fd < 0 || fd >= MAX_FILES_PER_PROCESS || proc->files[fd] == 0)
+        return -(int64_t)EBADF;
+    struct file *f = proc->files[fd];
+
+    if (f->node == 0 || f->node->read == 0) return -(int64_t)EINVAL;
+    if (iovcnt < 0) return -(int64_t)EINVAL;
+    if (iovcnt == 0) return 0;
+    if (iovcnt > 1024) return -(int64_t)EINVAL;
+
+    if (!uaccess_ok(iov, iovcnt * sizeof(struct iovec))) {
+        return -(int64_t)EFAULT;
+    }
+
+    struct iovec kiov[32];
+    struct iovec *kiov_ptr = kiov;
+    if (iovcnt > 32) {
+        kiov_ptr = kmalloc(iovcnt * sizeof(struct iovec));
+        if (!kiov_ptr) return -(int64_t)ENOMEM;
+    }
+
+    if (copy_from_user(kiov_ptr, iov, iovcnt * sizeof(struct iovec)) != 0) {
+        if (kiov_ptr != kiov) kfree(kiov_ptr);
+        return -(int64_t)EFAULT;
+    }
+
+    int64_t total_read = 0;
+    for (int i = 0; i < iovcnt; i++) {
+        void *buf = kiov_ptr[i].iov_base;
+        size_t len = kiov_ptr[i].iov_len;
+        if (len == 0) continue;
+
+        if (!uaccess_ok(buf, len)) {
+            if (kiov_ptr != kiov) kfree(kiov_ptr);
+            return -(int64_t)EFAULT;
+        }
+
+        size_t offset = 0;
+        while (offset < len) {
+            size_t chunk = len - offset;
+            if (chunk > READ_MAX_BUF) chunk = READ_MAX_BUF;
+
+            uint8_t kbuf[READ_MAX_BUF];
+            if (current_task) current_task->current_file_flags = f->flags;
+            int read_bytes = f->node->read(f->node, f->offset, kbuf, chunk);
+            if (read_bytes < 0) {
+                if (total_read > 0) {
+                    if (kiov_ptr != kiov) kfree(kiov_ptr);
+                    return total_read;
+                }
+                if (kiov_ptr != kiov) kfree(kiov_ptr);
+                return read_bytes;
+            }
+            if (read_bytes == 0) {
+                break;
+            }
+
+            int err = copy_to_user((uint8_t *)buf + offset, kbuf, read_bytes);
+            if (err != 0) {
+                if (kiov_ptr != kiov) kfree(kiov_ptr);
+                return -(int64_t)EFAULT;
+            }
+            f->offset += read_bytes;
+            total_read += read_bytes;
+            offset += read_bytes;
+
+            if ((size_t)read_bytes < chunk) {
+                break;
+            }
+        }
+    }
+
+    if (kiov_ptr != kiov) kfree(kiov_ptr);
+    return total_read;
+}
+
+int64_t sys_writev(struct syscall_frame *frame)
+{
+    int fd = (int)frame->rdi;
+    const struct iovec *iov = (const struct iovec *)frame->rsi;
+    int iovcnt = (int)frame->rdx;
+
+    if (current_task == 0 || current_task->process == 0) return -(int64_t)EPERM;
+    struct process *proc = current_task->process;
+
+    if (iovcnt < 0) return -(int64_t)EINVAL;
+    if (iovcnt == 0) return 0;
+    if (iovcnt > 1024) return -(int64_t)EINVAL;
+
+    if (!uaccess_ok(iov, iovcnt * sizeof(struct iovec))) {
+        return -(int64_t)EFAULT;
+    }
+
+    struct iovec kiov[32];
+    struct iovec *kiov_ptr = kiov;
+    if (iovcnt > 32) {
+        kiov_ptr = kmalloc(iovcnt * sizeof(struct iovec));
+        if (!kiov_ptr) return -(int64_t)ENOMEM;
+    }
+
+    if (copy_from_user(kiov_ptr, iov, iovcnt * sizeof(struct iovec)) != 0) {
+        if (kiov_ptr != kiov) kfree(kiov_ptr);
+        return -(int64_t)EFAULT;
+    }
+
+    struct file *f = 0;
+    if (fd >= 0 && fd < MAX_FILES_PER_PROCESS) {
+        f = proc->files[fd];
+    }
+
+    if (f) {
+        if (f->node == 0 || f->node->write == 0) {
+            if (kiov_ptr != kiov) kfree(kiov_ptr);
+            return -(int64_t)EBADF;
+        }
+    } else {
+        if (fd != 1 && fd != 2) {
+            if (kiov_ptr != kiov) kfree(kiov_ptr);
+            return -(int64_t)EBADF;
+        }
+    }
+
+    int64_t total_written = 0;
+    for (int i = 0; i < iovcnt; i++) {
+        const void *buf = kiov_ptr[i].iov_base;
+        size_t len = kiov_ptr[i].iov_len;
+        if (len == 0) continue;
+
+        if (!uaccess_ok(buf, len)) {
+            if (kiov_ptr != kiov) kfree(kiov_ptr);
+            return -(int64_t)EFAULT;
+        }
+
+        size_t offset = 0;
+        while (offset < len) {
+            size_t chunk = len - offset;
+            if (chunk > READ_MAX_BUF) chunk = READ_MAX_BUF;
+
+            uint8_t kbuf[READ_MAX_BUF];
+            if (copy_from_user(kbuf, (const uint8_t *)buf + offset, chunk) != 0) {
+                if (kiov_ptr != kiov) kfree(kiov_ptr);
+                return -(int64_t)EFAULT;
+            }
+
+            int written = 0;
+            if (f) {
+                written = f->node->write(f->node, f->offset, kbuf, chunk);
+                if (written > 0) {
+                    f->offset += written;
+                }
+            } else {
+                for (size_t c = 0; c < chunk; c++) {
+                    serial_write_char((char)kbuf[c]);
+                }
+                written = (int)chunk;
+            }
+
+            if (written < 0) {
+                if (total_written > 0) {
+                    if (kiov_ptr != kiov) kfree(kiov_ptr);
+                    return total_written;
+                }
+                if (kiov_ptr != kiov) kfree(kiov_ptr);
+                return written;
+            }
+            if (written == 0) {
+                break;
+            }
+            total_written += written;
+            offset += written;
+        }
+    }
+
+    if (kiov_ptr != kiov) kfree(kiov_ptr);
+    return total_written;
+}
 
 static int alloc_fd(struct process *proc)
 {
@@ -949,13 +1135,15 @@ int64_t sys_execve(struct syscall_frame *frame)
     if (argv != 0) {
         for (int i = 0; i < MAX_ARGV; i++) {
             uint64_t uptr;
-            if (copy_from_user(&uptr, argv + i, sizeof(uptr)) != 0) break;
+            if (copy_from_user(&uptr, argv + i, sizeof(uptr)) != 0) {
+                goto fail_fault_argv;
+            }
             if (uptr == 0) break;
             char *kstr = kmalloc(MAX_ARG_LEN);
             if (kstr == 0) goto fail_argv;
             if (copy_from_user(kstr, (const void *)uptr, MAX_ARG_LEN - 1) != 0) {
                 kfree(kstr);
-                goto fail_argv;
+                goto fail_fault_argv;
             }
             kstr[MAX_ARG_LEN - 1] = '\0';
             kargv[argc++] = kstr;
@@ -969,13 +1157,15 @@ int64_t sys_execve(struct syscall_frame *frame)
     if (envp != 0) {
         for (int i = 0; i < MAX_ARGV; i++) {
             uint64_t uptr;
-            if (copy_from_user(&uptr, envp + i, sizeof(uptr)) != 0) break;
+            if (copy_from_user(&uptr, envp + i, sizeof(uptr)) != 0) {
+                goto fail_fault_envp;
+            }
             if (uptr == 0) break;
             char *kstr = kmalloc(MAX_ARG_LEN);
             if (kstr == 0) goto fail_envp;
             if (copy_from_user(kstr, (const void *)uptr, MAX_ARG_LEN - 1) != 0) {
                 kfree(kstr);
-                goto fail_envp;
+                goto fail_fault_envp;
             }
             kstr[MAX_ARG_LEN - 1] = '\0';
             kenvp[envc++] = kstr;
@@ -985,9 +1175,21 @@ int64_t sys_execve(struct syscall_frame *frame)
 
     /* --- Lookup file --- */
     struct vfs_node *node = vfs_lookup_at(proc->cwd, kpath);
-    if (node == 0) { goto fail_lookup; }
-    if (node->type != VFS_TYPE_FILE) { goto fail_lookup; }
-    if (node->data == 0 || node->size == 0) { goto fail_exec; }
+    if (node == 0) {
+        for (int i = 0; i < envc; i++) kfree(kenvp[i]);
+        for (int i = 0; i < argc; i++) kfree(kargv[i]);
+        return -(int64_t)ENOENT;
+    }
+    if (node->type != VFS_TYPE_FILE) {
+        for (int i = 0; i < envc; i++) kfree(kenvp[i]);
+        for (int i = 0; i < argc; i++) kfree(kargv[i]);
+        return -(int64_t)EACCES;
+    }
+    if (node->data == 0 || node->size == 0) {
+        for (int i = 0; i < envc; i++) kfree(kenvp[i]);
+        for (int i = 0; i < argc; i++) kfree(kargv[i]);
+        return -(int64_t)ENOEXEC;
+    }
 
     /* --- Close FD_CLOEXEC descriptors --- */
     for (int i = 0; i < MAX_FILES_PER_PROCESS; i++) {
@@ -1002,7 +1204,11 @@ int64_t sys_execve(struct syscall_frame *frame)
     uint64_t entry = 0, rsp = 0;
     bool success = elf_load_into_process(proc, node->data, node->size,
                                           argc, kargv, kenvp, &entry, &rsp);
-    if (!success) { goto fail_exec; }
+    if (!success) {
+        for (int i = 0; i < envc; i++) kfree(kenvp[i]);
+        for (int i = 0; i < argc; i++) kfree(kargv[i]);
+        return -(int64_t)ENOEXEC;
+    }
 
     /* Update task for syscall return to new image */
     current_task->user_rip = entry;
@@ -1018,15 +1224,17 @@ int64_t sys_execve(struct syscall_frame *frame)
     for (int i = 0; i < envc; i++) kfree(kenvp[i]);
     return 0;
 
-fail_exec:
-    for (int i = 0; i < envc; i++) kfree(kenvp[i]);
-fail_lookup:
 fail_envp:
-    for (int i = 0; i < argc; i++) kfree(kargv[i]);
-    return -(int64_t)ENOEXEC;
+    for (int i = 0; i < envc; i++) kfree(kenvp[i]);
 fail_argv:
     for (int i = 0; i < argc; i++) kfree(kargv[i]);
     return -(int64_t)ENOMEM;
+
+fail_fault_envp:
+    for (int i = 0; i < envc; i++) kfree(kenvp[i]);
+fail_fault_argv:
+    for (int i = 0; i < argc; i++) kfree(kargv[i]);
+    return -(int64_t)EFAULT;
 }
 
 /* ------------------------------------------------------------------ */

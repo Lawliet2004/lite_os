@@ -164,13 +164,17 @@ $(BUILD_DIR)/kernel/core/user_binaries.o: $(BUILD_DIR)/user/test_read_kernel.elf
 
 $(BUILD_DIR)/kernel/fs/initramfs_binary.o: $(BUILD_DIR)/initramfs.tar
 
-$(BUILD_DIR)/initramfs.tar: $(BUILD_DIR)/user/init.elf $(BUILD_DIR)/user/sh.elf $(RAWSYSCALL_TESTS)
+hello_musl: hello_musl.c
+	C:\msys64\clang64\bin\zig.exe cc -target x86_64-linux-musl -static hello_musl.c -o hello_musl
+
+$(BUILD_DIR)/initramfs.tar: $(BUILD_DIR)/user/init.elf $(BUILD_DIR)/user/sh.elf $(RAWSYSCALL_TESTS) hello_musl
 	@mkdir -p $(BUILD_DIR)/initramfs-root/bin
 	@mkdir -p $(BUILD_DIR)/initramfs-root/tests
 	cp $(BUILD_DIR)/user/init.elf $(BUILD_DIR)/initramfs-root/bin/init
 	cp $(BUILD_DIR)/user/sh.elf $(BUILD_DIR)/initramfs-root/bin/sh
 	@echo "Hello, LiteNix VFS!" > $(BUILD_DIR)/initramfs-root/hello.txt
 	@echo "This is a test file in /bin" > $(BUILD_DIR)/initramfs-root/bin/test.txt
+	cp hello_musl $(BUILD_DIR)/initramfs-root/bin/hello_musl
 	cp $(BUILD_DIR)/tests/raw/test_write_exit.elf  $(BUILD_DIR)/initramfs-root/tests/test_write_exit
 	cp $(BUILD_DIR)/tests/raw/test_read.elf        $(BUILD_DIR)/initramfs-root/tests/test_read
 	cp $(BUILD_DIR)/tests/raw/test_stat.elf        $(BUILD_DIR)/initramfs-root/tests/test_stat
@@ -242,7 +246,9 @@ define boot-and-capture
 endef
 
 # Standard boot: every success marker must appear, and no exception/panic.
-verify-boot: $(ISO)
+verify-boot:
+	$(MAKE) clean
+	$(MAKE) iso
 	$(call boot-and-capture,$(SERIAL_LOG))
 	@grep -q "VMM: address-space self-test passed" $(SERIAL_LOG)
 	@grep -q "VMM: negative self-test passed" $(SERIAL_LOG)

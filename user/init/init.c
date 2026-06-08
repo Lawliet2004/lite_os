@@ -688,6 +688,83 @@ int main(int argc, char **argv)
     close(test_sock);
     printf("Test 17: PASSED\n\n");
 
+    // Test 18: Static musl hello world check
+    printf("Test 18: Running static musl hello world (/bin/hello_musl)...\n");
+    int musl_pid = fork();
+    if (musl_pid < 0) {
+        printf("Init ERROR: fork for musl hello failed\n");
+        exit(1);
+    }
+    if (musl_pid == 0) {
+        char *musl_argv[] = { "/bin/hello_musl", "arg1", "arg2", 0 };
+        char *musl_envp[] = { "ENV_VAR=hello_env", 0 };
+        execve("/bin/hello_musl", musl_argv, musl_envp);
+        printf("Init ERROR: execve /bin/hello_musl failed\n");
+        exit(1);
+    } else {
+        int mstatus = 0;
+        int mret = wait4(musl_pid, &mstatus, 0, 0);
+        if (mret != musl_pid) {
+            printf("Init ERROR: wait4 for musl hello got pid %d instead of %d\n", mret, musl_pid);
+            exit(1);
+        }
+        if (!WIFEXITED(mstatus) || WEXITSTATUS(mstatus) != 0) {
+            printf("Init ERROR: musl hello exited with status %d (raw=%d)\n", WEXITSTATUS(mstatus), mstatus);
+            exit(1);
+        }
+        printf("Test 18: PASSED\n\n");
+    }
+
+    // Test 19: Rejection of missing/invalid executables and bad pointers
+    printf("Test 19: Rejection of missing/invalid executables and bad pointers...\n");
+    
+    // 1. Missing file check (-ENOENT)
+    printf("  - Testing execve of missing file...\n");
+    char *bad_argv[] = { "/bin/non_existent_file_xyz", 0 };
+    int ret1 = execve("/bin/non_existent_file_xyz", bad_argv, 0);
+    if (ret1 != -2) { // ENOENT = 2
+        printf("Init ERROR: execve missing file returned %d instead of -2 (-ENOENT)\n", ret1);
+        exit(1);
+    }
+    printf("    -ENOENT check PASSED\n");
+
+    // 2. Non-executable file check (-ENOEXEC)
+    printf("  - Testing execve of non-ELF file...\n");
+    char *txt_argv[] = { "/hello.txt", 0 };
+    int ret2 = execve("/hello.txt", txt_argv, 0);
+    if (ret2 != -8) { // ENOEXEC = 8
+        printf("Init ERROR: execve non-ELF file returned %d instead of -8 (-ENOEXEC)\n", ret2);
+        exit(1);
+    }
+    printf("    -ENOEXEC check PASSED\n");
+
+    // 3. Bad pointer check (-EFAULT)
+    printf("  - Testing execve of bad pointer...\n");
+    int ret3 = execve((const char *)0xdeadbeef, 0, 0);
+    if (ret3 != -14) { // EFAULT = 14
+        printf("Init ERROR: execve bad path pointer returned %d instead of -14 (-EFAULT)\n", ret3);
+        exit(1);
+    }
+    
+    int ret4 = execve("/bin/hello_musl", (char *const *)0xdeadbeef, 0);
+    if (ret4 != -14) { // EFAULT = 14
+        printf("Init ERROR: execve bad argv pointer returned %d instead of -14 (-EFAULT)\n", ret4);
+        exit(1);
+    }
+    printf("    -EFAULT check PASSED\n");
+
+    // 4. Directory file check (-EACCES)
+    printf("  - Testing execve of directory...\n");
+    char *dir_argv[] = { "/", 0 };
+    int ret5 = execve("/", dir_argv, 0);
+    if (ret5 != -13) { // EACCES = 13
+        printf("Init ERROR: execve directory returned %d instead of -13 (-EACCES)\n", ret5);
+        exit(1);
+    }
+    printf("    -EACCES check PASSED\n");
+    
+    printf("Test 19: PASSED\n\n");
+
     // Launch UDP Echo Server
     printf("Launching UDP Echo Server on port 9999...\n");
     int udp_pid = fork();

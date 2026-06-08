@@ -78,6 +78,8 @@
 #define SYS_mprotect     10
 #define SYS_munmap       11
 #define SYS_brk          12
+#define SYS_readv        19
+#define SYS_writev       20
 #define SYS_ioctl        16
 #define SYS_access       21
 #define SYS_dup          32

@@ -33,6 +33,8 @@ int64_t sys_faccessat(struct syscall_frame *frame);
 int64_t sys_readlink(struct syscall_frame *frame);
 int64_t sys_readlinkat(struct syscall_frame *frame);
 int64_t sys_statx(struct syscall_frame *frame);
+int64_t sys_readv(struct syscall_frame *frame);
+int64_t sys_writev(struct syscall_frame *frame);
 
 /* process lifecycle (sys_exit.c) */
 int64_t sys_exit(struct syscall_frame *frame);
@@ -115,6 +117,8 @@ void syscall_table_init(void)
     /* ---- File I/O ---- */
     syscall_table[SYS_read]      = sys_read;
     syscall_table[SYS_write]     = sys_write;
+    syscall_table[SYS_readv]     = sys_readv;
+    syscall_table[SYS_writev]    = sys_writev;
     syscall_table[SYS_open]      = sys_open;
     syscall_table[SYS_openat]    = sys_openat;
     syscall_table[SYS_close]     = sys_close;
