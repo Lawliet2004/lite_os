@@ -168,9 +168,18 @@ $(BUILD_DIR)/kernel/fs/initramfs_binary.o: $(BUILD_DIR)/initramfs.tar
 hello_musl: hello_musl.c
 	C:\msys64\clang64\bin\zig.exe cc -target x86_64-linux-musl -static hello_musl.c -o hello_musl
 
-$(BUILD_DIR)/initramfs.tar: $(BUILD_DIR)/user/init.elf $(BUILD_DIR)/user/sh.elf $(RAWSYSCALL_TESTS) hello_musl
+# Dynamic musl binary - built with zig dynamically linking musl
+$(BUILD_DIR)/tests/userspace/dynamic-musl/hello_dynamic: tests/userspace/dynamic-musl/hello_dynamic.c
+	@mkdir -p $(dir $@)
+	C:\msys64\clang64\bin\zig.exe cc -target x86_64-linux-musl -dynamic $< -o $@
+	MSYS_NO_PATHCONV=1 python3 scripts/patch_interpreter.py $@ $(BUILD_DIR)/tests/userspace/dynamic-musl/missing_interp /lib/ld-musl-x86_64.so.1 /lib/nonexistent.so || MSYS_NO_PATHCONV=1 python scripts/patch_interpreter.py $@ $(BUILD_DIR)/tests/userspace/dynamic-musl/missing_interp /lib/ld-musl-x86_64.so.1 /lib/nonexistent.so
+	MSYS_NO_PATHCONV=1 python3 scripts/patch_interpreter.py $@ $(BUILD_DIR)/tests/userspace/dynamic-musl/invalid_interp /lib/ld-musl-x86_64.so.1 /hello.txt || MSYS_NO_PATHCONV=1 python scripts/patch_interpreter.py $@ $(BUILD_DIR)/tests/userspace/dynamic-musl/invalid_interp /lib/ld-musl-x86_64.so.1 /hello.txt
+
+$(BUILD_DIR)/initramfs.tar: $(BUILD_DIR)/user/init.elf $(BUILD_DIR)/user/sh.elf $(RAWSYSCALL_TESTS) hello_musl $(BUILD_DIR)/tests/userspace/dynamic-musl/hello_dynamic
 	@mkdir -p $(BUILD_DIR)/initramfs-root/bin
 	@mkdir -p $(BUILD_DIR)/initramfs-root/tests
+	@mkdir -p $(BUILD_DIR)/initramfs-root/lib
+	@mkdir -p $(BUILD_DIR)/initramfs-root/lib64
 	cp $(BUILD_DIR)/user/init.elf $(BUILD_DIR)/initramfs-root/bin/init
 	cp $(BUILD_DIR)/user/sh.elf $(BUILD_DIR)/initramfs-root/bin/sh
 	@echo "Hello, LiteNix VFS!" > $(BUILD_DIR)/initramfs-root/hello.txt
@@ -185,6 +194,15 @@ $(BUILD_DIR)/initramfs.tar: $(BUILD_DIR)/user/init.elf $(BUILD_DIR)/user/sh.elf 
 	cp $(BUILD_DIR)/tests/raw/test_clock.elf       $(BUILD_DIR)/initramfs-root/tests/test_clock
 	cp $(BUILD_DIR)/tests/raw/test_getrandom.elf   $(BUILD_DIR)/initramfs-root/tests/test_getrandom
 	cp $(BUILD_DIR)/tests/raw/test_all.elf         $(BUILD_DIR)/initramfs-root/tests/test_all
+	# Copy fake interpreter and dynamic binary for PT_INTERP test
+	cp tests/userspace/dynamic-musl/fake_interp $(BUILD_DIR)/initramfs-root/tests/fake_interp
+	cp tests/userspace/dynamic-musl/dynamic_binary $(BUILD_DIR)/initramfs-root/tests/dynamic_binary
+	# Copy dynamic musl hello world and the patched dynamic test binaries
+	cp $(BUILD_DIR)/tests/userspace/dynamic-musl/hello_dynamic $(BUILD_DIR)/initramfs-root/bin/hello_dynamic
+	cp $(BUILD_DIR)/tests/userspace/dynamic-musl/missing_interp $(BUILD_DIR)/initramfs-root/tests/missing_interp
+	cp $(BUILD_DIR)/tests/userspace/dynamic-musl/invalid_interp $(BUILD_DIR)/initramfs-root/tests/invalid_interp
+	# Copy musl dynamic linker to initramfs /lib/ld-musl-x86_64.so.1
+	cp tests/userspace/dynamic-musl/ld-musl-x86_64.so.1 $(BUILD_DIR)/initramfs-root/lib/ld-musl-x86_64.so.1
 	python3 scripts/make_initramfs.py $(BUILD_DIR)/initramfs-root $(BUILD_DIR)/initramfs.tar || python scripts/make_initramfs.py $(BUILD_DIR)/initramfs-root $(BUILD_DIR)/initramfs.tar
 
 $(BUILD_DIR)/user/init.elf: user/init/init.c user/libc-lite/libc_lite.c user/libc-lite/libc_lite.h user/user.ld
@@ -268,6 +286,8 @@ verify-boot:
 	@grep -q "Net: Initialized network protocol stack" $(SERIAL_LOG)
 	@grep -q "UDP Echo Server listening on port 9999" $(SERIAL_LOG)
 	@grep -q "TCP HTTP Server listening on port 80" $(SERIAL_LOG)
+	@grep -q "Test 22: PASSED" $(SERIAL_LOG)
+	@grep -q "Hello from dynamic musl!" $(SERIAL_LOG)
 	@! grep -q "CPU exception" $(SERIAL_LOG)
 	@! grep -q "KERNEL PANIC" $(SERIAL_LOG)
 	@echo "Boot verification passed"

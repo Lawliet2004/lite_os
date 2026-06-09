@@ -5,6 +5,6 @@
 #include <stddef.h>
 
 struct task *elf_load(const char *name, const void *elf_data, size_t elf_size, int argc, char **argv, char **envp);
-bool elf_load_into_process(struct process *proc, const void *elf_data, size_t elf_size, int argc, char **argv, char **envp, uint64_t *out_entry, uint64_t *out_rsp);
+int elf_load_into_process(struct process *proc, const void *elf_data, size_t elf_size, int argc, char **argv, char **envp, const char *exec_path, uint64_t *out_entry, uint64_t *out_rsp);
 
 #endif /* LITENIX_KERNEL_ELF_LOADER_H */

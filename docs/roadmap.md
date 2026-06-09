@@ -137,7 +137,7 @@ cannot execute privileged instructions, and cannot crash the kernel.
 - initial user stack
 - argc, argv, and envp
 - auxv later
-- PT_INTERP later
+- PT_INTERP detection and interpreter loading (tested with fake interpreter)
 
 Acceptance: static hello world loads, invalid ELF files are rejected safely, and
 failed exec does not leak kernel memory.

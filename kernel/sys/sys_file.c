@@ -1202,12 +1202,12 @@ int64_t sys_execve(struct syscall_frame *frame)
 
     /* --- Load ELF --- */
     uint64_t entry = 0, rsp = 0;
-    bool success = elf_load_into_process(proc, node->data, node->size,
-                                          argc, kargv, kenvp, &entry, &rsp);
-    if (!success) {
+    int load_err = elf_load_into_process(proc, node->data, node->size,
+                                          argc, kargv, kenvp, filename, &entry, &rsp);
+    if (load_err != 0) {
         for (int i = 0; i < envc; i++) kfree(kenvp[i]);
         for (int i = 0; i < argc; i++) kfree(kargv[i]);
-        return -(int64_t)ENOEXEC;
+        return (int64_t)load_err;
     }
 
     /* Update task for syscall return to new image */

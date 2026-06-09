@@ -81,7 +81,8 @@ For machine-readable scoreboard, see [compatibility_scoreboard.csv](./compatibil
 | **Raw Syscall Suite** (`test_all`) | Static | None (Direct) | `write`, `exit_group`, `openat`, `read`, `close`, `newfstatat`, `brk`, `mmap`, `munmap`, `getpid`, `gettid`, `uname`, `clock_gettime`, `nanosleep`, `getrandom` | **PASS** | 2026-06-08 | `RAWSYSCALL: all tests passed` |
 | **Static Musl Hello** (`hello_musl`) | Static | musl | `writev`, `exit_group`, `readv` | **PASS** | 2026-06-08 | `Hello from musl!\nargc = 3\nargv[0] = /bin/hello_musl` |
 | **Static BusyBox** | Static | musl | `chmod`, `fchmod`, `chown`, `statx`, `ioctl`, process groups, signals | **Fail (Target)** | 2026-06-08 | N/A (Blocked by Phase 5 syscalls) |
-| **Dynamic Musl Hello** | Dynamic | musl | `mmap` (file-backed), `PT_INTERP` loader, auxiliary vectors | **Fail (Target)** | 2026-06-09 | File-backed mmap implemented; blocked by PT_INTERP/auxv in Phase 2 |
+| **Dynamic Binary Test** | Dynamic | N/A | `mmap` (file-backed), `PT_INTERP` loader, auxiliary vectors | **PASS** | 2026-06-09 | `Dynamic kernel loader path works!` in serial log |
+| **Dynamic Musl Hello** | Dynamic | musl | Full musl dynamic linker, shared libs, relocation | **Fail (Target)** | 2026-06-09 | Kernel loader works; full musl ldso support deferred to Phase 3 |
 | **BusyBox Shell** | Static | musl | `setsid`, `setpgid`, TTY line discipline, signal frame delivery | **Fail (Target)** | 2026-06-08 | N/A (Blocked by Phase 6 terminal / signals) |
 
 ---

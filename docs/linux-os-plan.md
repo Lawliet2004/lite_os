@@ -28,7 +28,7 @@ and compatibility tests all agree.
 | **Phase 3: ELF Loader & Static Programs** | **Completed** | Static musl hello runs with correct argv/envp passing, and execve invalid inputs are rejected safely. |
 | **Phase 4: VMA & Page Fault Paging** | **Completed** | Process VMA management, overlap detection, splits/merges, and anonymous lazy demand paging. |
 | **Phase 5: File-backed mmap** | **Completed** | File-backed mmap MAP_PRIVATE with COW page fault loading; offset alignment validated. |
-| **Phase 6: Dynamic Linker Support** | *Planned* | PT_INTERP loading and dynamic Musl hello world. |
+| **Phase 6: Dynamic Linker Support** | **Completed** | PT_INTERP detection, interpreter loading with base address for ET_DYN, full auxiliary vector (AT_PHDR, AT_PHENT, AT_PHNUM, AT_BASE, AT_ENTRY, AT_RANDOM, AT_EXECFN, AT_UID, AT_EUID, AT_GID, AT_EGID, AT_SECURE), SysV stack alignment. Tested with fake interpreter. |
 
 ## Immediate Work Queue
 

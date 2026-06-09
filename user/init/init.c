@@ -761,7 +761,25 @@ int main(int argc, char **argv)
         printf("Init ERROR: execve directory returned %d instead of -13 (-EACCES)\n", ret5);
         exit(1);
     }
-    printf("    -EACCES check PASSED\n");
+    // 5. Missing interpreter check (-ENOENT = -2)
+    printf("  - Testing execve of dynamic binary with missing interpreter...\n");
+    char *miss_argv[] = { "/tests/missing_interp", 0 };
+    int ret_miss = execve("/tests/missing_interp", miss_argv, 0);
+    if (ret_miss != -2) {
+        printf("Init ERROR: execve missing interpreter returned %d instead of -2 (-ENOENT)\n", ret_miss);
+        exit(1);
+    }
+    printf("    -ENOENT (missing interpreter) check PASSED\n");
+
+    // 6. Invalid interpreter format check (-ENOEXEC = -8)
+    printf("  - Testing execve of dynamic binary with invalid interpreter format...\n");
+    char *inv_argv[] = { "/tests/invalid_interp", 0 };
+    int ret_inv = execve("/tests/invalid_interp", inv_argv, 0);
+    if (ret_inv != -8) {
+        printf("Init ERROR: execve invalid interpreter returned %d instead of -8 (-ENOEXEC)\n", ret_inv);
+        exit(1);
+    }
+    printf("    -ENOEXEC (invalid interpreter format) check PASSED\n");
     
     printf("Test 19: PASSED\n\n");
 
@@ -789,6 +807,58 @@ int main(int argc, char **argv)
         exit(1);
     }
     printf("Test 20: PASSED\n\n");
+
+    // Test 21: Dynamic binary PT_INTERP test
+    printf("Test 21: Testing dynamic binary PT_INTERP path...\n");
+    int dyn_pid = fork();
+    if (dyn_pid < 0) {
+        printf("Init ERROR: fork for dynamic binary test failed\n");
+        exit(1);
+    }
+    if (dyn_pid == 0) {
+        char *dyn_argv[] = { "/tests/dynamic_binary", 0 };
+        char *dyn_envp[] = { "DYNAMIC_TEST=hello", 0 };
+        execve("/tests/dynamic_binary", dyn_argv, dyn_envp);
+        printf("Init ERROR: execve /tests/dynamic_binary failed\n");
+        exit(1);
+    }
+    int dyn_status;
+    wait4(dyn_pid, &dyn_status, 0, NULL);
+    if (WIFSIGNALED(dyn_status)) {
+        printf("Init ERROR: dynamic binary terminated by signal %d\n", WTERMSIG(dyn_status));
+        exit(1);
+    }
+    if (WEXITSTATUS(dyn_status) != 0) {
+        printf("Init ERROR: dynamic binary exited with code %d\n", WEXITSTATUS(dyn_status));
+        exit(1);
+    }
+    printf("Test 21: PASSED\n\n");
+
+    // Test 22: Real dynamic musl hello world
+    printf("Test 22: Running real dynamically linked musl hello world (/bin/hello_dynamic)...\n");
+    int musl_dyn_pid = fork();
+    if (musl_dyn_pid < 0) {
+        printf("Init ERROR: fork for dynamic musl hello failed\n");
+        exit(1);
+    }
+    if (musl_dyn_pid == 0) {
+        char *dyn_argv[] = { "/bin/hello_dynamic", 0 };
+        execve("/bin/hello_dynamic", dyn_argv, 0);
+        printf("Init ERROR: execve /bin/hello_dynamic failed\n");
+        exit(1);
+    } else {
+        int dstatus = 0;
+        wait4(musl_dyn_pid, &dstatus, 0, 0);
+        if (WIFSIGNALED(dstatus)) {
+            printf("Init ERROR: dynamic musl hello terminated by signal %d\n", WTERMSIG(dstatus));
+            exit(1);
+        }
+        if (WEXITSTATUS(dstatus) != 0) {
+            printf("Init ERROR: dynamic musl hello exited with code %d\n", WEXITSTATUS(dstatus));
+            exit(1);
+        }
+        printf("Test 22: PASSED\n\n");
+    }
 
     // Launch UDP Echo Server
     printf("Launching UDP Echo Server on port 9999...\n");
