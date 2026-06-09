@@ -51,9 +51,67 @@ typedef int64_t off_t;
 #define WIFSIGNALED(s)  (((s) & 0x7f) != 0 && ((s) & 0x7f) != 0x7f)
 #define WTERMSIG(s)     ((s) & 0x7f)
 
+/* Signals */
+#define SIGHUP     1
+#define SIGINT     2
+#define SIGQUIT    3
+#define SIGILL     4
+#define SIGTRAP    5
+#define SIGABRT    6
+#define SIGIOT     6
+#define SIGBUS     7
+#define SIGFPE     8
+#define SIGKILL    9
+#define SIGUSR1    10
+#define SIGSEGV    11
+#define SIGUSR2    12
+#define SIGPIPE    13
+#define SIGALRM    14
+#define SIGTERM    15
+#define SIGSTKFLT  16
+#define SIGCHLD    17
+#define SIGCONT    18
+#define SIGSTOP    19
+#define SIGTSTP    20
+#define SIGTTIN    21
+#define SIGTTOU    22
+#define SIGURG     23
+#define SIGXCPU    24
+#define SIGXFSZ    25
+#define SIGVTALRM  26
+#define SIGPROF    27
+#define SIGWINCH   28
+#define SIGIO      29
+#define SIGPOLL    SIGIO
+#define SIGPWR     30
+#define SIGSYS     31
+
+#define SIG_DFL    ((void (*)(int))0)
+#define SIG_IGN    ((void (*)(int))1)
+#define SIG_ERR    ((void (*)(int))-1)
+
+#define SIG_BLOCK   0
+#define SIG_UNBLOCK 1
+#define SIG_SETMASK 2
+
 /* ioctl numbers */
-#define TIOCGWINSZ  0x5413
 #define TCGETS      0x5401
+#define TCSETS      0x5402
+#define TCSETSW     0x5403
+#define TCSETSF     0x5404
+#define TIOCGWINSZ  0x5413
+#define TIOCSWINSZ  0x5414
+#define TIOCGPGRP   0x540F
+#define TIOCSPGRP   0x5410
+
+struct termios {
+    uint32_t c_iflag;
+    uint32_t c_oflag;
+    uint32_t c_cflag;
+    uint32_t c_lflag;
+    uint8_t  c_line;
+    uint8_t  c_cc[32];
+};
 
 struct winsize {
     unsigned short ws_row;
@@ -65,17 +123,22 @@ struct winsize {
 struct stat {
     uint64_t st_dev;
     uint64_t st_ino;
+    uint64_t st_nlink;
     uint32_t st_mode;
-    uint32_t st_nlink;
     uint32_t st_uid;
     uint32_t st_gid;
+    uint32_t __pad0;
     uint64_t st_rdev;
     int64_t  st_size;
     int64_t  st_blksize;
     int64_t  st_blocks;
     int64_t  st_atime;
+    uint64_t st_atime_nsec;
     int64_t  st_mtime;
+    uint64_t st_mtime_nsec;
     int64_t  st_ctime;
+    uint64_t st_ctime_nsec;
+    int64_t  __unused[3];
 };
 
 struct linux_dirent64 {
@@ -165,6 +228,7 @@ int unlink(const char *pathname);
 int rename(const char *oldpath, const char *newpath);
 int chdir(const char *path);
 char *getcwd(char *buf, size_t size);
+int symlink(const char *target, const char *linkpath);
 
 /* Process */
 int execve(const char *pathname, char *const argv[], char *const envp[]);
@@ -174,6 +238,10 @@ int wait4(int pid, int *wstatus, int options, void *rusage);
 int getpid(void);
 int gettid(void);
 int getppid(void);
+int setpgid(int pid, int pgid);
+int getpgid(int pid);
+int setsid(void);
+int getsid(int pid);
 int clone(unsigned long flags, void *child_stack, int *parent_tid, int *child_tid, unsigned long newtls);
 int clone_thread(int (*fn)(void *), void *child_stack, void *arg);
 int futex(uint32_t *uaddr, int op, uint32_t val, const void *timeout, uint32_t *uaddr2, uint32_t val3);
@@ -181,6 +249,17 @@ int arch_prctl(int code, unsigned long addr);
 int set_tid_address(int *tidptr);
 int set_robust_list(void *head, size_t len);
 int get_robust_list(int pid, void **head, size_t *len);
+
+struct sigaction {
+    void (*sa_handler)(int);
+    unsigned long sa_flags;
+    void (*sa_restorer)(void);
+    uint64_t sa_mask;
+};
+
+int sigaction(int signum, const struct sigaction *act, struct sigaction *oldact);
+int sigprocmask(int how, const uint64_t *set, uint64_t *oldset);
+int kill(int pid, int sig);
 int uname(struct utsname *buf);
 ssize_t getrandom(void *buf, size_t buflen, unsigned int flags);
 int getrlimit(int resource, struct rlimit *rlim);

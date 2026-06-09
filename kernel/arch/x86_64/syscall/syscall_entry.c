@@ -36,9 +36,10 @@ static uint64_t rdmsr(uint32_t msr)
 
 void syscall_init(void)
 {
-    /* Point KERNEL_GS_BASE to the per-CPU context structure */
-    wrmsr(MSR_KERNEL_GS_BASE, (uint64_t)(uintptr_t)&bsp_cpu_context);
-    wrmsr(MSR_GS_BASE, 0); /* User GS base starts as 0 */
+    /* Since we boot in kernel mode, MSR_GS_BASE (active GS base) points to bsp_cpu_context,
+       and MSR_KERNEL_GS_BASE (swapped user GS base) starts as 0. */
+    wrmsr(MSR_GS_BASE, (uint64_t)(uintptr_t)&bsp_cpu_context);
+    wrmsr(MSR_KERNEL_GS_BASE, 0);
 
     /* Enable SCE bit in EFER */
     uint64_t efer = rdmsr(MSR_EFER);

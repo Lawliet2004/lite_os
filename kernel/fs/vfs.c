@@ -66,36 +66,15 @@ static int default_dir_readdir(struct vfs_node *node, size_t index, struct vfs_d
 static int console_read(struct vfs_node *node, size_t offset, void *buf, size_t count)
 {
     (void)node; (void)offset;
-    if (count == 0) return 0;
-
-    char *cbuf = buf;
-    size_t read_bytes = 0;
-
-    while (read_bytes < count) {
-        char ch = serial_read_char();
-        // Echo characters back to terminal
-        if (ch == '\r') {
-            ch = '\n';
-        }
-        // Echo back to user
-        serial_write_char(ch);
-
-        cbuf[read_bytes++] = ch;
-        if (ch == '\n') {
-            break;
-        }
-    }
-    return (int)read_bytes;
+    extern int tty_driver_read(void *buf, size_t count);
+    return tty_driver_read(buf, count);
 }
 
 static int console_write(struct vfs_node *node, size_t offset, const void *buf, size_t count)
 {
     (void)node; (void)offset;
-    const char *cbuf = buf;
-    for (size_t i = 0; i < count; i++) {
-        serial_write_char(cbuf[i]);
-    }
-    return (int)count;
+    extern int tty_driver_write(const void *buf, size_t count);
+    return tty_driver_write(buf, count);
 }
 
 // PRNG state for /dev/random and /dev/urandom
@@ -600,27 +579,20 @@ void vfs_canonicalize_path(const char *src, char *dst)
     }
 }
 
-struct vfs_node *vfs_lookup(const char *path)
+static struct vfs_node *vfs_resolve_path_rec(struct vfs_node *start_node, const char *path, bool follow_last_symlink, int depth, int *err_out)
 {
-    if (path == 0) return 0;
-
-    char cleanpath[512];
-    if (path[0] != '/') {
-        char temp[512];
-        temp[0] = '/';
-        size_t len = strlen(path);
-        if (len >= 510) return 0;
-        memcpy(temp + 1, path, len + 1);
-        vfs_canonicalize_path(temp, cleanpath);
-    } else {
-        vfs_canonicalize_path(path, cleanpath);
+    if (depth > 16) {
+        *err_out = -ELOOP;
+        return 0;
+    }
+    if (path == 0 || path[0] == '\0') {
+        *err_out = -ENOENT;
+        return 0;
     }
 
-    struct vfs_node *current = root_node;
-    const char *p = cleanpath;
-    if (p[0] == '/') {
-        p++;
-    }
+    struct vfs_node *current = (path[0] == '/') ? root_node : (start_node ? start_node : root_node);
+    const char *p = path;
+    while (*p == '/') p++; // Skip leading/consecutive slashes
 
     char component[128];
     while (*p != '\0') {
@@ -630,78 +602,125 @@ struct vfs_node *vfs_lookup(const char *path)
         }
         component[len] = '\0';
 
-        if (*p == '/') {
-            p++;
-        }
+        while (*p == '/') p++; // Skip consecutive slashes
 
-        if (len == 0) {
+        if (len == 0) continue;
+
+        if (strcmp(component, ".") == 0) {
+            continue;
+        }
+        if (strcmp(component, "..") == 0) {
+            if (current->parent != 0) {
+                current = current->parent;
+            }
             continue;
         }
 
+        // Search children of current
         struct vfs_node *child = current->children;
-        bool found = false;
+        struct vfs_node *found = 0;
         while (child != 0) {
             if (strcmp(child->name, component) == 0) {
-                current = child;
-                found = true;
+                found = child;
                 break;
             }
             child = child->next;
         }
 
-        if (!found) {
-            if (strcmp(current->name, "proc") == 0 && current->parent == root_node) {
-                bool numeric = true;
-                if (component[0] == '\0') numeric = false;
-                for (int i = 0; component[i] != '\0'; i++) {
-                    if (component[i] < '0' || component[i] > '9') {
-                        numeric = false;
-                        break;
-                    }
+        // Special procfs numeric directory handling (e.g. /proc/123)
+        if (found == 0 && strcmp(current->name, "proc") == 0 && current->parent == root_node) {
+            bool numeric = true;
+            for (int i = 0; component[i] != '\0'; i++) {
+                if (component[i] < '0' || component[i] > '9') {
+                    numeric = false;
+                    break;
                 }
-                if (numeric) {
-                    uint64_t pid = 0;
-                    for (int i = 0; component[i] != '\0'; i++) {
-                        pid = pid * 10 + (component[i] - '0');
-                    }
-                    struct process *p = find_process(pid);
-                    if (p != 0) {
-                        char pid_dir_path[256];
-                        strcpy(pid_dir_path, "/proc/");
-                        strcat(pid_dir_path, component);
-
-                        struct vfs_node *pid_dir = vfs_create_file(pid_dir_path, VFS_TYPE_DIR, 0, 0);
-                        if (pid_dir != 0) {
-                            char pid_status_path[256];
-                            strcpy(pid_status_path, pid_dir_path);
-                            strcat(pid_status_path, "/status");
-
-                            struct vfs_node *status_node = vfs_create_device(pid_status_path, proc_pid_status_read, 0);
-                            if (status_node != 0) {
-                                status_node->data = (void *)(uintptr_t)pid;
+            }
+            if (numeric) {
+                uint64_t pid = 0;
+                for (int i = 0; component[i] != '\0'; i++) {
+                    pid = pid * 10 + (component[i] - '0');
+                }
+                struct process *proc = find_process(pid);
+                if (proc != 0) {
+                    char pid_dir_path[256];
+                    strcpy(pid_dir_path, "/proc/");
+                    strcat(pid_dir_path, component);
+                    struct vfs_node *pid_dir = vfs_create_file(pid_dir_path, VFS_TYPE_DIR, 0, 0);
+                    if (pid_dir != 0) {
+                        char pid_status_path[256];
+                        strcpy(pid_status_path, pid_dir_path);
+                        strcat(pid_status_path, "/status");
+                        struct vfs_node *status_node = vfs_create_device(pid_status_path, proc_pid_status_read, 0);
+                        if (status_node != 0) {
+                            status_node->data = (void *)(uintptr_t)pid;
+                        }
+                        // Search again
+                        child = current->children;
+                        while (child != 0) {
+                            if (strcmp(child->name, component) == 0) {
+                                found = child;
+                                break;
                             }
-
-                            child = current->children;
-                            while (child != 0) {
-                                if (strcmp(child->name, component) == 0) {
-                                    current = child;
-                                    found = true;
-                                    break;
-                                }
-                                child = child->next;
-                            }
+                            child = child->next;
                         }
                     }
                 }
             }
         }
 
-        if (!found) {
+        if (found == 0) {
+            *err_out = -ENOENT;
             return 0;
         }
+
+        // Symlink handling
+        if (found->type == VFS_TYPE_LINK) {
+            bool is_last = (*p == '\0');
+            if (is_last && !follow_last_symlink) {
+                current = found;
+            } else {
+                const char *target = (const char *)found->data;
+                if (target == 0 || target[0] == '\0') {
+                    *err_out = -ENOENT;
+                    return 0;
+                }
+                struct vfs_node *resolved = vfs_resolve_path_rec(found->parent, target, true, depth + 1, err_out);
+                if (resolved == 0) {
+                    return 0;
+                }
+                current = resolved;
+            }
+        } else {
+            bool is_last = (*p == '\0');
+            if (!is_last && found->type != VFS_TYPE_DIR) {
+                *err_out = -ENOTDIR;
+                return 0;
+            }
+            current = found;
+        }
     }
+
     return current;
 }
+
+struct vfs_node *vfs_resolve_path_at(struct vfs_node *start_node, const char *path, bool follow_last_symlink, int *err_out)
+{
+    *err_out = 0;
+    return vfs_resolve_path_rec(start_node, path, follow_last_symlink, 0, err_out);
+}
+
+struct vfs_node *vfs_create_symlink(const char *target, const char *linkpath)
+{
+    return vfs_create_file(linkpath, VFS_TYPE_LINK, strlen(target) + 1, target);
+}
+
+struct vfs_node *vfs_lookup(const char *path)
+{
+    int err = 0;
+    return vfs_resolve_path_at(root_node, path, true, &err);
+}
+
 
 struct vfs_node *vfs_create_file(const char *path, uint32_t type, size_t size, const void *data)
 {
@@ -753,9 +772,11 @@ struct vfs_node *vfs_create_file(const char *path, uint32_t type, size_t size, c
             if (is_last) {
                 new_node->type = type;
                 new_node->size = size;
-                if (type == VFS_TYPE_FILE) {
-                    new_node->read = default_file_read;
-                    new_node->write = default_file_write;
+                if (type == VFS_TYPE_FILE || type == VFS_TYPE_LINK) {
+                    if (type == VFS_TYPE_FILE) {
+                        new_node->read = default_file_read;
+                        new_node->write = default_file_write;
+                    }
                     if (size > 0 && data != 0) {
                         new_node->data = kmalloc(size);
                         if (new_node->data == 0) {
@@ -805,33 +826,14 @@ struct vfs_node *vfs_create_device(const char *path, vfs_read_t read, vfs_write_
  */
 struct vfs_node *vfs_lookup_at(const char *cwd, const char *path)
 {
-    if (path == 0) return 0;
-    if (path[0] == '/') {
-        return vfs_lookup(path);
-    }
-
-    /* Build absolute path = cwd + "/" + path */
-    char abspath[512];
-    if (cwd == 0 || cwd[0] == '\0') {
-        abspath[0] = '/';
-        abspath[1] = '\0';
-    } else {
-        size_t clen = strlen(cwd);
-        if (clen >= sizeof(abspath) - 2) return 0;
-        memcpy(abspath, cwd, clen);
-        if (abspath[clen - 1] != '/') {
-            abspath[clen] = '/';
-            clen++;
+    struct vfs_node *start = root_node;
+    if (path != 0 && path[0] != '/') {
+        if (cwd != 0 && cwd[0] != '\0') {
+            start = vfs_lookup(cwd);
         }
-        abspath[clen] = '\0';
     }
-
-    size_t alen = strlen(abspath);
-    size_t plen = strlen(path);
-    if (alen + plen >= sizeof(abspath)) return 0;
-    memcpy(abspath + alen, path, plen + 1);
-
-    return vfs_lookup(abspath);
+    int err = 0;
+    return vfs_resolve_path_at(start, path, true, &err);
 }
 
 /* ------------------------------------------------------------------ */

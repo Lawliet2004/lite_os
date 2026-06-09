@@ -2,6 +2,20 @@
 
 static char thread_stack[8192];
 static volatile uint32_t thread_flag = 0;
+static volatile int usr1_handler_called = 0;
+static volatile int int_handler_called = 0;
+
+static void test_usr1_handler(int sig)
+{
+    usr1_handler_called++;
+    printf("    [signal] USR1 handler invoked (sig=%d, call_count=%d)\n", sig, usr1_handler_called);
+}
+
+static void test_int_handler(int sig)
+{
+    int_handler_called++;
+    printf("    [signal] INT handler invoked (sig=%d, call_count=%d)\n", sig, int_handler_called);
+}
 
 static int test_thread_func(void *arg)
 {
@@ -930,10 +944,457 @@ int main(int argc, char **argv)
         exit(0);
     }
 
+    // Test 23: BusyBox and Symlink Suite
+    printf("Test 23: Testing symlink, loop detection, and BusyBox applets...\n");
+
+    // 1. Verify symlink creation and loop detection (ELOOP)
+    printf("  - Creating circular symlinks loop1 -> loop2 and loop2 -> loop1...\n");
+    if (symlink("/bin/loop2", "/bin/loop1") != 0) {
+        printf("Init ERROR: symlink /bin/loop1 failed\n");
+        exit(1);
+    }
+    if (symlink("/bin/loop1", "/bin/loop2") != 0) {
+        printf("Init ERROR: symlink /bin/loop2 failed\n");
+        exit(1);
+    }
+    printf("  - Testing ELOOP detection...\n");
+    int loop_fd = open("/bin/loop1", O_RDONLY);
+    if (loop_fd != -40) { // ELOOP is 40 (negative is -40)
+        printf("Init ERROR: opening circular symlink did not return -ELOOP (returned %d)\n", loop_fd);
+        exit(1);
+    }
+    printf("    Circular symlink ELOOP check PASSED\n");
+
+    // Clean up loops
+    unlink("/bin/loop1");
+    unlink("/bin/loop2");
+
+    // 2. Create BusyBox applet symlinks
+    const char *applets[] = { "sh", "ls", "cat", "echo", "pwd", "mkdir", "rm", "cp", "mv", "true", "false", "sleep", "uname" };
+    int num_applets = sizeof(applets) / sizeof(applets[0]);
+    printf("  - Creating symlinks for %d BusyBox applets...\n", num_applets);
+    for (int i = 0; i < num_applets; i++) {
+        char linkpath[64];
+        snprintf(linkpath, sizeof(linkpath), "/bin/%s", applets[i]);
+        // Unlink if it already exists to be clean (e.g. sh, mkdir, rm)
+        unlink(linkpath);
+        if (symlink("/bin/busybox", linkpath) != 0) {
+            printf("Init ERROR: Failed to symlink /bin/%s to /bin/busybox\n", applets[i]);
+            exit(1);
+        }
+    }
+    printf("    Applet symlink creation PASSED\n");
+
+    // 3. Execute applets and verify
+    printf("  - Executing /bin/echo hello...\n");
+    int echo_pid = fork();
+    if (echo_pid == 0) {
+        char *echo_argv[] = { "/bin/echo", "hello", 0 };
+        execve("/bin/echo", echo_argv, 0);
+        exit(1);
+    }
+    int echo_status = 0;
+    wait4(echo_pid, &echo_status, 0, 0);
+    if (!WIFEXITED(echo_status) || WEXITSTATUS(echo_status) != 0) {
+        printf("Init ERROR: /bin/echo exited with %d\n", WEXITSTATUS(echo_status));
+        exit(1);
+    }
+
+    printf("  - Executing /bin/ls /...\n");
+    int ls_pid = fork();
+    if (ls_pid == 0) {
+        char *ls_argv[] = { "/bin/ls", "/", 0 };
+        execve("/bin/ls", ls_argv, 0);
+        exit(1);
+    }
+    int ls_status = 0;
+    wait4(ls_pid, &ls_status, 0, 0);
+    if (!WIFEXITED(ls_status) || WEXITSTATUS(ls_status) != 0) {
+        printf("Init ERROR: /bin/ls exited with %d\n", WEXITSTATUS(ls_status));
+        exit(1);
+    }
+
+    printf("  - Executing /bin/cat /hello.txt...\n");
+    int cat_pid = fork();
+    if (cat_pid == 0) {
+        char *cat_argv[] = { "/bin/cat", "/hello.txt", 0 };
+        execve("/bin/cat", cat_argv, 0);
+        exit(1);
+    }
+    int cat_status = 0;
+    wait4(cat_pid, &cat_status, 0, 0);
+    if (!WIFEXITED(cat_status) || WEXITSTATUS(cat_status) != 0) {
+        printf("Init ERROR: /bin/cat exited with %d\n", WEXITSTATUS(cat_status));
+        exit(1);
+    }
+
+    printf("  - Executing /bin/mkdir /tmp/a...\n");
+    int mkdir_pid = fork();
+    if (mkdir_pid == 0) {
+        char *mkdir_argv[] = { "/bin/mkdir", "/tmp/a", 0 };
+        execve("/bin/mkdir", mkdir_argv, 0);
+        exit(1);
+    }
+    int mkdir_status = 0;
+    wait4(mkdir_pid, &mkdir_status, 0, 0);
+    if (!WIFEXITED(mkdir_status) || WEXITSTATUS(mkdir_status) != 0) {
+        printf("Init ERROR: /bin/mkdir exited with %d\n", WEXITSTATUS(mkdir_status));
+        exit(1);
+    }
+
+    printf("  - Executing /bin/cp /hello.txt /tmp/a/copy...\n");
+    int cp_pid = fork();
+    if (cp_pid == 0) {
+        char *cp_argv[] = { "/bin/cp", "/hello.txt", "/tmp/a/copy", 0 };
+        execve("/bin/cp", cp_argv, 0);
+        exit(1);
+    }
+    int cp_status = 0;
+    wait4(cp_pid, &cp_status, 0, 0);
+    if (!WIFEXITED(cp_status) || WEXITSTATUS(cp_status) != 0) {
+        printf("Init ERROR: /bin/cp exited with %d\n", WEXITSTATUS(cp_status));
+        exit(1);
+    }
+
+    int check_fd = open("/tmp/a/copy", O_RDONLY);
+    if (check_fd < 0) {
+        printf("Init ERROR: copied file /tmp/a/copy does not exist!\n");
+        exit(1);
+    }
+    close(check_fd);
+
+    printf("  - Executing /bin/rm /tmp/a/copy...\n");
+    int rm_pid = fork();
+    if (rm_pid == 0) {
+        char *rm_argv[] = { "/bin/rm", "/tmp/a/copy", 0 };
+        execve("/bin/rm", rm_argv, 0);
+        exit(1);
+    }
+    int rm_status = 0;
+    wait4(rm_pid, &rm_status, 0, 0);
+    if (!WIFEXITED(rm_status) || WEXITSTATUS(rm_status) != 0) {
+        printf("Init ERROR: /bin/rm exited with %d\n", WEXITSTATUS(rm_status));
+        exit(1);
+    }
+    rmdir("/tmp/a");
+
+    printf("  - Executing /bin/true...\n");
+    int true_pid = fork();
+    if (true_pid == 0) {
+        char *true_argv[] = { "/bin/true", 0 };
+        execve("/bin/true", true_argv, 0);
+        exit(1);
+    }
+    int true_status = 0;
+    wait4(true_pid, &true_status, 0, 0);
+    if (!WIFEXITED(true_status) || WEXITSTATUS(true_status) != 0) {
+        printf("Init ERROR: /bin/true exited with %d\n", WEXITSTATUS(true_status));
+        exit(1);
+    }
+
+    printf("  - Executing /bin/false...\n");
+    int false_pid = fork();
+    if (false_pid == 0) {
+        char *false_argv[] = { "/bin/false", 0 };
+        execve("/bin/false", false_argv, 0);
+        exit(1);
+    }
+    int false_status = 0;
+    wait4(false_pid, &false_status, 0, 0);
+    if (!WIFEXITED(false_status) || WEXITSTATUS(false_status) != 1) {
+        printf("Init ERROR: /bin/false exited with %d (expected 1)\n", WEXITSTATUS(false_status));
+        exit(1);
+    }
+
+    printf("  - Executing /bin/sleep 1...\n");
+    int sleep_pid = fork();
+    if (sleep_pid == 0) {
+        char *sleep_argv[] = { "/bin/sleep", "1", 0 };
+        execve("/bin/sleep", sleep_argv, 0);
+        exit(1);
+    }
+    int sleep_status = 0;
+    wait4(sleep_pid, &sleep_status, 0, 0);
+    if (!WIFEXITED(sleep_status) || WEXITSTATUS(sleep_status) != 0) {
+        printf("Init ERROR: /bin/sleep exited with %d\n", WEXITSTATUS(sleep_status));
+        exit(1);
+    }
+
+    printf("Test 23: PASSED\n\n");
+
+    // Test 24: Process groups, sessions, and terminal ioctls
+    printf("Test 24: Testing PGID, SID, termios, winsize, and foreground PGID ioctls...\n");
+
+    // 1. setpgid / getpgid check
+    setsid();
+    int init_pid = getpid();
+    int init_pgid = getpgid(0);
+    int init_pgid_explicit = getpgid(init_pid);
+    printf("  - Init process PID: %d, PGID: %d (explicitly retrieved: %d)\n", init_pid, init_pgid, init_pgid_explicit);
+    if (init_pgid != init_pid || init_pgid_explicit != init_pid) {
+        printf("Init ERROR: Init PGID check failed (expected %d)\n", init_pid);
+        exit(1);
+    }
+
+    int test24_pid = fork();
+    if (test24_pid < 0) {
+        printf("Init ERROR: fork for Test 24 failed\n");
+        exit(1);
+    }
+
+    if (test24_pid == 0) {
+        // Child process
+        int child_pid = getpid();
+        int inherited_pgid = getpgid(0);
+        if (inherited_pgid != init_pid) {
+            printf("Child ERROR: inherited PGID was %d instead of %d\n", inherited_pgid, init_pid);
+            exit(10);
+        }
+
+        // Change SID (setsid)
+        int new_sid = setsid();
+        if (new_sid != child_pid) {
+            printf("Child ERROR: setsid() returned %d instead of %d\n", new_sid, child_pid);
+            exit(13);
+        }
+        int getsid_ret = getsid(0);
+        if (getsid_ret != child_pid) {
+            printf("Child ERROR: getsid(0) returned %d instead of %d\n", getsid_ret, child_pid);
+            exit(14);
+        }
+
+        // Change PGID
+        if (setpgid(0, 0) != 0) {
+            printf("Child ERROR: setpgid(0, 0) failed\n");
+            exit(11);
+        }
+        int new_pgid = getpgid(0);
+        if (new_pgid != child_pid) {
+            printf("Child ERROR: PGID after setpgid(0,0) was %d instead of %d\n", new_pgid, child_pid);
+            exit(12);
+        }
+
+        printf("  - Child PGID and SID updates PASSED\n");
+        exit(0);
+    } else {
+        // Parent process
+        int test24_status = 0;
+        wait4(test24_pid, &test24_status, 0, 0);
+        if (!WIFEXITED(test24_status) || WEXITSTATUS(test24_status) != 0) {
+            printf("Init ERROR: Child process setsid/setpgid checks failed with exit status %d\n", WEXITSTATUS(test24_status));
+            exit(1);
+        }
+    }
+
+    // 2. Terminal ioctls check (/dev/tty or /dev/console)
+    int term_fd = open("/dev/tty", O_RDWR);
+    if (term_fd < 0) {
+        // Try /dev/console fallback
+        term_fd = open("/dev/console", O_RDWR);
+    }
+    if (term_fd < 0) {
+        printf("Init ERROR: Failed to open /dev/tty or /dev/console for ioctl test\n");
+        exit(1);
+    }
+
+    printf("  - Testing winsize ioctls...\n");
+    struct winsize ws;
+    memset(&ws, 0, sizeof(ws));
+    if (ioctl(term_fd, TIOCGWINSZ, &ws) != 0) {
+        printf("Init ERROR: ioctl(TIOCGWINSZ) failed\n");
+        exit(1);
+    }
+    printf("    Winsize retrieved: %d rows, %d cols\n", ws.ws_row, ws.ws_col);
+    if (ws.ws_row != 24 || ws.ws_col != 80) {
+        printf("Init ERROR: ws_row/ws_col values wrong (expected 24x80, got %dx%d)\n", ws.ws_row, ws.ws_col);
+        exit(1);
+    }
+
+    printf("  - Testing termios ioctls...\n");
+    struct termios t_orig, t_mod, t_check;
+    if (ioctl(term_fd, TCGETS, &t_orig) != 0) {
+        printf("Init ERROR: ioctl(TCGETS) failed\n");
+        exit(1);
+    }
+
+    t_mod = t_orig;
+    t_mod.c_lflag ^= 0x0002; // Toggle ICANON or similar
+    if (ioctl(term_fd, TCSETS, &t_mod) != 0) {
+        printf("Init ERROR: ioctl(TCSETS) failed\n");
+        exit(1);
+    }
+
+    if (ioctl(term_fd, TCGETS, &t_check) != 0) {
+        printf("Init ERROR: second ioctl(TCGETS) failed\n");
+        exit(1);
+    }
+
+    if (t_check.c_lflag != t_mod.c_lflag) {
+        printf("Init ERROR: termios settings did not persist (expected lflag %p, got %p)\n", t_mod.c_lflag, t_check.c_lflag);
+        exit(1);
+    }
+
+    // Restore original termios
+    if (ioctl(term_fd, TCSETS, &t_orig) != 0) {
+        printf("Init ERROR: restoring original termios failed\n");
+        exit(1);
+    }
+
+    printf("  - Testing foreground process group ioctls...\n");
+    uint32_t orig_fg = 0;
+    if (ioctl(term_fd, TIOCGPGRP, &orig_fg) != 0) {
+        printf("Init ERROR: ioctl(TIOCGPGRP) failed\n");
+        exit(1);
+    }
+    printf("    Original foreground PGID: %d\n", orig_fg);
+
+    // Try changing foreground PGID to something else (e.g. init's pid, or a fake pgid)
+    uint32_t new_fg = 12345;
+    if (ioctl(term_fd, TIOCSPGRP, &new_fg) != 0) {
+        printf("Init ERROR: ioctl(TIOCSPGRP) failed\n");
+        exit(1);
+    }
+
+    uint32_t check_fg = 0;
+    if (ioctl(term_fd, TIOCGPGRP, &check_fg) != 0) {
+        printf("Init ERROR: second ioctl(TIOCGPGRP) failed\n");
+        exit(1);
+    }
+    if (check_fg != new_fg) {
+        printf("Init ERROR: fg pgid did not update (expected %d, got %d)\n", new_fg, check_fg);
+        exit(1);
+    }
+
+    // Restore original fg pgid
+    if (ioctl(term_fd, TIOCSPGRP, &orig_fg) != 0) {
+        printf("Init ERROR: restoring original fg pgid failed\n");
+        exit(1);
+    }
+
+    close(term_fd);
+
+    printf("Test 24: PASSED\n\n");
+
+    // Test 25: Signal action, blocking, and custom handler delivery
+    printf("Test 25: Testing signal action, blocking, and custom handler delivery...\n");
+    
+    // 1. Register SIGUSR1 handler
+    struct sigaction sa_usr1;
+    memset(&sa_usr1, 0, sizeof(sa_usr1));
+    sa_usr1.sa_handler = test_usr1_handler;
+    if (sigaction(SIGUSR1, &sa_usr1, 0) != 0) {
+        printf("Init ERROR: sigaction for SIGUSR1 failed\n");
+        exit(1);
+    }
+    printf("  - Registered SIGUSR1 handler\n");
+
+    // 2. Register SIGINT handler
+    struct sigaction sa_int;
+    memset(&sa_int, 0, sizeof(sa_int));
+    sa_int.sa_handler = test_int_handler;
+    if (sigaction(SIGINT, &sa_int, 0) != 0) {
+        printf("Init ERROR: sigaction for SIGINT failed\n");
+        exit(1);
+    }
+    printf("  - Registered SIGINT handler\n");
+
+    // 3. Send SIGUSR1 to self
+    usr1_handler_called = 0;
+    printf("  - Sending SIGUSR1 to self (PID=%d)...\n", getpid());
+    if (kill(getpid(), SIGUSR1) != 0) {
+        printf("Init ERROR: kill(SIGUSR1) failed\n");
+        exit(1);
+    }
+    
+    if (usr1_handler_called != 1) {
+        printf("Init ERROR: SIGUSR1 handler was not called immediately (usr1_handler_called=%d)\n", usr1_handler_called);
+        exit(1);
+    }
+    printf("  - SIGUSR1 successfully caught and returned to next statement\n");
+
+    // 4. Send SIGINT to self
+    int_handler_called = 0;
+    printf("  - Sending SIGINT to self...\n");
+    if (kill(getpid(), SIGINT) != 0) {
+        printf("Init ERROR: kill(SIGINT) failed\n");
+        exit(1);
+    }
+    if (int_handler_called != 1) {
+        printf("Init ERROR: SIGINT handler was not called immediately (int_handler_called=%d)\n", int_handler_called);
+        exit(1);
+    }
+    printf("  - SIGINT successfully caught and returned to next statement\n");
+
+    // 5. Signal blocking test
+    printf("  - Testing signal blocking...\n");
+    uint64_t block_mask = (1ULL << SIGUSR1);
+    uint64_t old_mask = 0;
+    if (sigprocmask(SIG_BLOCK, &block_mask, &old_mask) != 0) {
+        printf("Init ERROR: sigprocmask(SIG_BLOCK) failed\n");
+        exit(1);
+    }
+    printf("    - Blocked SIGUSR1 (old mask = %llx)\n", (unsigned long long)old_mask);
+
+    usr1_handler_called = 0;
+    printf("    - Sending SIGUSR1 to self while blocked...\n");
+    if (kill(getpid(), SIGUSR1) != 0) {
+        printf("Init ERROR: kill(SIGUSR1) while blocked failed\n");
+        exit(1);
+    }
+    
+    if (usr1_handler_called != 0) {
+        printf("Init ERROR: blocked SIGUSR1 was delivered! (usr1_handler_called=%d)\n", usr1_handler_called);
+        exit(1);
+    }
+    printf("    - Blocked signal was not delivered (PASSED)\n");
+
+    // Unblock SIGUSR1
+    printf("    - Unblocking SIGUSR1...\n");
+    if (sigprocmask(SIG_UNBLOCK, &block_mask, 0) != 0) {
+        printf("Init ERROR: sigprocmask(SIG_UNBLOCK) failed\n");
+        exit(1);
+    }
+
+    // Now, unblocking should deliver the pending SIGUSR1 immediately
+    if (usr1_handler_called != 1) {
+        printf("Init ERROR: pending SIGUSR1 was not delivered upon unblocking! (usr1_handler_called=%d)\n", usr1_handler_called);
+        exit(1);
+    }
+    printf("    - Pending signal was delivered immediately upon unblocking (PASSED)\n");
+
+    printf("Test 25: PASSED\n\n");
+
     printf("All VFS Verification Tests Passed!\n");
 
     /* Early-exit for kernel Phase 9/10 self-test (init is called with "test_arg") */
     if (argc > 1 && strcmp(argv[1], "test_arg") == 0) {
+        printf("\n--- Running scripted BusyBox shell tests ---\n");
+
+        const char *tests[] = {
+            "echo hello",
+            "echo hello | cat",
+            "mkdir /tmp/a && echo hi > /tmp/a/f && cat /tmp/a/f",
+            "sleep 1"
+        };
+
+        for (size_t i = 0; i < sizeof(tests)/sizeof(tests[0]); i++) {
+            printf("  - Testing: /bin/sh -c \"%s\"\n", tests[i]);
+            int sh_pid = fork();
+            if (sh_pid == 0) {
+                char *sh_argv[] = { "/bin/sh", "-c", (char *)tests[i], 0 };
+                execve("/bin/sh", sh_argv, 0);
+                exit(1);
+            }
+            int sh_status = 0;
+            wait4(sh_pid, &sh_status, 0, 0);
+            if (!WIFEXITED(sh_status) || WEXITSTATUS(sh_status) != 0) {
+                printf("Init ERROR: shell test failed with status %d\n", WEXITSTATUS(sh_status));
+                exit(1);
+            }
+            printf("    PASSED\n");
+        }
+
+        printf("All shell tests PASSED\n");
         printf("Init: Running in test mode. Exiting with 0.\n");
         exit(0);
     }

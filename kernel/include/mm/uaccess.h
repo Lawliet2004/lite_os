@@ -32,6 +32,15 @@ int copy_from_user(void *kdst, const void *usrc, size_t len);
 int copy_to_user(void *udst, const void *ksrc, size_t len);
 
 /*
+ * copy_string_from_user — safely copy a NUL-terminated string from user space
+ * into a kernel buffer of size max_len (including NUL). Reads byte-by-byte up
+ * to the actual NUL terminator so it never validates more bytes than the string
+ * actually contains, avoiding false-EFAULT when a short string sits near the
+ * top of user address space. Returns 0 on success, -1 on fault.
+ */
+int copy_string_from_user(char *kdst, const char *usrc, size_t max_len);
+
+/*
  * uaccess_ok — check whether [ptr, ptr+len) is a valid user range.
  * Returns 1 (true) if valid, 0 if not.
  */

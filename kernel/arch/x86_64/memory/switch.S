@@ -32,6 +32,7 @@ jump_to_usermode:
     mov ds, ax
     mov es, ax
     mov fs, ax
+    swapgs
     mov gs, ax
 
     ; Build iretq frame

@@ -3,6 +3,7 @@
 #include <arch/x86_64/pic.h>
 #include <arch/x86_64/vmm.h>
 #include <mm/pmm.h>
+#include <mm/uaccess.h>
 #include <drivers/pit.h>
 #include <kernel/panic.h>
 #include <kernel/printk.h>
@@ -229,6 +230,15 @@ void exception_dispatch(struct interrupt_frame *frame)
                exception_name(frame->vector), frame->vector, frame->error_code, frame->rip,
                current_task != 0 ? current_task->name : "none",
                current_task != 0 ? current_task->pid : 0);
+        printk("  RAX: 0x%llx RBX: 0x%llx RCX: 0x%llx RDX: 0x%llx\n",
+               frame->rax, frame->rbx, frame->rcx, frame->rdx);
+        printk("  RSI: 0x%llx RDI: 0x%llx RSP: 0x%llx RBP: 0x%llx\n",
+               frame->rsi, frame->rdi, frame->user_rsp, frame->rbp);
+        printk("  R8 : 0x%llx R9 : 0x%llx R10: 0x%llx R11: 0x%llx\n",
+               frame->r8, frame->r9, frame->r10, frame->r11);
+        printk("  R12: 0x%llx R13: 0x%llx R14: 0x%llx R15: 0x%llx\n",
+               frame->r12, frame->r13, frame->r14, frame->r15);
+
         int sig = 11; /* Default to SIGSEGV */
         if (frame->vector == 0) sig = 8; /* SIGFPE */
 
@@ -238,7 +248,7 @@ void exception_dispatch(struct interrupt_frame *frame)
                 strcmp(current_task->name, "test_privileged") == 0) {
                 task_exit(-((int)frame->vector));
             } else {
-                task_deliver_signals();
+                task_deliver_signals(0);
                 task_exit(-sig);
             }
         } else {
@@ -292,6 +302,15 @@ void irq_dispatch(struct interrupt_frame *frame)
     case 1:
         keyboard_irq();
         break;
+    case 4: {
+        extern bool serial_has_char(void);
+        extern void tty_input_char(char ch);
+        while (serial_has_char()) {
+            char ch = (char)inb(0x3F8); /* COM1_PORT */
+            tty_input_char(ch);
+        }
+        break;
+    }
     default:
         break;
     }

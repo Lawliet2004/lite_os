@@ -48,7 +48,7 @@
 #define AT_PHNUM   5
 #define AT_PAGESZ  6
 #define AT_BASE    7
-#define AT_ENTRY   8
+#define AT_ENTRY   9
 #define AT_RANDOM  25
 #define AT_EXECFN  31
 #define AT_UID     11

@@ -18,6 +18,8 @@
 #include <drivers/serial.h>
 #include <drivers/pit.h>
 
+typedef uint32_t mode_t;
+
 #define PATH_MAX_LEN 256
 #define READ_MAX_BUF 4096
 #define AT_FDCWD -100
@@ -251,17 +253,121 @@ static inline size_t align_up(size_t value, size_t alignment)
     return (value + alignment - 1) & ~(alignment - 1);
 }
 
-static bool path_is_absolute(const char *path)
-{
-    return path != 0 && path[0] == '/';
-}
-
 static bool valid_access_mode(int mode)
 {
     return (mode & ~(R_OK | W_OK | X_OK)) == 0;
 }
 
-static int64_t open_copied_path(const char *kpath, int flags)
+static struct vfs_node *resolve_dirfd_ex(int dirfd, const char *kpath, bool follow_last_symlink, int flags, int *err_out)
+{
+    if (kpath[0] == '\0' && (flags & AT_EMPTY_PATH)) {
+        if (dirfd == AT_FDCWD) {
+            return vfs_lookup(current_task->process->cwd);
+        }
+        if (dirfd < 0 || dirfd >= MAX_FILES_PER_PROCESS) {
+            *err_out = -EBADF;
+            return 0;
+        }
+        struct file *f = current_task->process->files[dirfd];
+        if (f == 0) {
+            *err_out = -EBADF;
+            return 0;
+        }
+        return f->node;
+    }
+
+    if (kpath[0] == '/') {
+        return vfs_resolve_path_at(vfs_get_root(), kpath, follow_last_symlink, err_out);
+    }
+    if (dirfd == AT_FDCWD) {
+        struct vfs_node *cwd_node = vfs_lookup(current_task->process->cwd);
+        return vfs_resolve_path_at(cwd_node, kpath, follow_last_symlink, err_out);
+    }
+    if (dirfd < 0 || dirfd >= MAX_FILES_PER_PROCESS) {
+        *err_out = -EBADF;
+        return 0;
+    }
+    struct file *f = current_task->process->files[dirfd];
+    if (f == 0) {
+        *err_out = -EBADF;
+        return 0;
+    }
+    if (f->node->type != VFS_TYPE_DIR) {
+        *err_out = -ENOTDIR;
+        return 0;
+    }
+    return vfs_resolve_path_at(f->node, kpath, follow_last_symlink, err_out);
+}
+
+static int vfs_get_node_path(struct vfs_node *node, char *buf, size_t bufsz)
+{
+    if (node == 0) return -1;
+    if (node->parent == 0) {
+        if (bufsz < 2) return -1;
+        buf[0] = '/';
+        buf[1] = '\0';
+        return 0;
+    }
+
+    char temp[512];
+    temp[0] = '\0';
+
+    struct vfs_node *curr = node;
+    while (curr != 0 && curr->parent != 0) {
+        char part[256];
+        strcpy(part, "/");
+        strcat(part, curr->name);
+
+        char next_temp[512];
+        strcpy(next_temp, part);
+        strcat(next_temp, temp);
+        strcpy(temp, next_temp);
+
+        curr = curr->parent;
+    }
+
+    if (strlen(temp) >= bufsz) return -1;
+    strcpy(buf, temp);
+    return 0;
+}
+
+static int get_absolute_path_at(int dirfd, const char *kpath, char *out_path, size_t out_sz)
+{
+    if (kpath[0] == '/') {
+        if (strlen(kpath) >= out_sz) return -ENAMETOOLONG;
+        strcpy(out_path, kpath);
+        return 0;
+    }
+
+    struct vfs_node *start_node = 0;
+    if (dirfd == AT_FDCWD) {
+        start_node = vfs_lookup(current_task->process->cwd);
+    } else {
+        if (dirfd < 0 || dirfd >= MAX_FILES_PER_PROCESS) return -EBADF;
+        struct file *f = current_task->process->files[dirfd];
+        if (f == 0) return -EBADF;
+        if (f->node->type != VFS_TYPE_DIR) return -ENOTDIR;
+        start_node = f->node;
+    }
+
+    char start_path[512];
+    if (vfs_get_node_path(start_node, start_path, sizeof(start_path)) != 0) {
+        return -ENAMETOOLONG;
+    }
+
+    size_t slen = strlen(start_path);
+    size_t plen = strlen(kpath);
+    if (slen + 1 + plen >= out_sz) return -ENAMETOOLONG;
+
+    strcpy(out_path, start_path);
+    if (out_path[slen - 1] != '/') {
+        strcat(out_path, "/");
+    }
+    strcat(out_path, kpath);
+    return 0;
+}
+
+static int64_t open_copied_path_at(int dirfd, const char *kpath, int flags)
 {
     if (current_task == 0 || current_task->process == 0) return -(int64_t)EPERM;
     struct process *proc = current_task->process;
@@ -269,23 +375,22 @@ static int64_t open_copied_path(const char *kpath, int flags)
     int fd = alloc_fd(proc);
     if (fd < 0) return -(int64_t)EMFILE;
 
-    struct vfs_node *node = vfs_lookup_at(proc->cwd, kpath);
+    int err = 0;
+    struct vfs_node *node = resolve_dirfd_ex(dirfd, kpath, !(flags & O_NOFOLLOW), flags, &err);
     if (node == 0) {
         if (flags & O_CREAT) {
-            char abspath[PATH_MAX_LEN];
-            if (kpath[0] == '/') {
-                memcpy(abspath, kpath, strlen(kpath) + 1);
-            } else {
-                size_t clen = strlen(proc->cwd);
-                memcpy(abspath, proc->cwd, clen);
-                if (abspath[clen-1] != '/') abspath[clen++] = '/';
-                memcpy(abspath + clen, kpath, strlen(kpath) + 1);
-            }
-            node = vfs_create_file(abspath, VFS_TYPE_FILE, 0, 0);
+            char abspath[512];
+            int get_err = get_absolute_path_at(dirfd, kpath, abspath, sizeof(abspath));
+            if (get_err < 0) return get_err;
+
+            char cleanpath[512];
+            vfs_canonicalize_path(abspath, cleanpath);
+
+            node = vfs_create_file(cleanpath, VFS_TYPE_FILE, 0, 0);
             if (node == 0) return -(int64_t)ENOMEM;
-            node->mode = S_IFREG | 0644;
+            node->mode = S_IFREG | ((0666 & ~proc->umask) & 07777);
         } else {
-            return -(int64_t)ENOENT;
+            return err;
         }
     }
 
@@ -309,22 +414,17 @@ static int64_t open_copied_path(const char *kpath, int flags)
     return fd;
 }
 
-/* ------------------------------------------------------------------ */
-/* open                                                                 */
-/* ------------------------------------------------------------------ */
-
 int64_t sys_open(struct syscall_frame *frame)
 {
     const char *pathname = (const char *)frame->rdi;
     int flags = (int)frame->rsi;
-    /* mode (frame->rdx) used for O_CREAT — ignored for now (always 0644) */
 
     char kpath[PATH_MAX_LEN];
-    int err = copy_from_user(kpath, pathname, PATH_MAX_LEN - 1);
+    int err = copy_string_from_user(kpath, pathname, PATH_MAX_LEN);
     if (err != 0) return -(int64_t)EFAULT;
     kpath[PATH_MAX_LEN - 1] = '\0';
 
-    return open_copied_path(kpath, flags);
+    return open_copied_path_at(AT_FDCWD, kpath, flags);
 }
 
 int64_t sys_openat(struct syscall_frame *frame)
@@ -334,16 +434,13 @@ int64_t sys_openat(struct syscall_frame *frame)
     int flags = (int)frame->rdx;
 
     char kpath[PATH_MAX_LEN];
-    int err = copy_from_user(kpath, pathname, PATH_MAX_LEN - 1);
+    int err = copy_string_from_user(kpath, pathname, PATH_MAX_LEN);
     if (err != 0) return -(int64_t)EFAULT;
     kpath[PATH_MAX_LEN - 1] = '\0';
 
-    if (dirfd != AT_FDCWD && !path_is_absolute(kpath)) {
-        return -(int64_t)ENOSYS;
-    }
-
-    return open_copied_path(kpath, flags);
+    return open_copied_path_at(dirfd, kpath, flags);
 }
+
 
 /* ------------------------------------------------------------------ */
 /* close                                                                */
@@ -489,6 +586,8 @@ static void fill_stat(struct stat *ks, struct vfs_node *node)
     ks->st_ino    = node->inode_num;
     ks->st_size   = node->size;
     ks->st_nlink  = 1;
+    ks->st_uid    = node->uid;
+    ks->st_gid    = node->gid;
     ks->st_blksize = 4096;
     ks->st_blocks  = (node->size + 511) / 512;
     ks->st_atime   = node->atime;
@@ -538,11 +637,12 @@ int64_t sys_stat(struct syscall_frame *frame)
     if (current_task == 0 || current_task->process == 0) return -(int64_t)EPERM;
 
     char kpath[PATH_MAX_LEN];
-    if (copy_from_user(kpath, pathname, PATH_MAX_LEN - 1) != 0) return -(int64_t)EFAULT;
+    if (copy_string_from_user(kpath, pathname, PATH_MAX_LEN) != 0) return -(int64_t)EFAULT;
     kpath[PATH_MAX_LEN - 1] = '\0';
 
-    struct vfs_node *node = vfs_lookup_at(current_task->process->cwd, kpath);
-    if (node == 0) return -(int64_t)ENOENT;
+    int err = 0;
+    struct vfs_node *node = vfs_resolve_path_at(0, kpath, true, &err);
+    if (node == 0) return err;
 
     struct stat ks;
     fill_stat(&ks, node);
@@ -551,28 +651,46 @@ int64_t sys_stat(struct syscall_frame *frame)
     return 0;
 }
 
-/* lstat: same as stat (no symlink support yet) */
-int64_t sys_lstat(struct syscall_frame *frame) { return sys_stat(frame); }
+int64_t sys_lstat(struct syscall_frame *frame)
+{
+    const char *pathname = (const char *)frame->rdi;
+    struct stat *statbuf = (struct stat *)frame->rsi;
+
+    if (current_task == 0 || current_task->process == 0) return -(int64_t)EPERM;
+
+    char kpath[PATH_MAX_LEN];
+    if (copy_string_from_user(kpath, pathname, PATH_MAX_LEN) != 0) return -(int64_t)EFAULT;
+    kpath[PATH_MAX_LEN - 1] = '\0';
+
+    int err = 0;
+    struct vfs_node *node = vfs_resolve_path_at(0, kpath, false, &err);
+    if (node == 0) return err;
+
+    struct stat ks;
+    fill_stat(&ks, node);
+
+    if (copy_to_user(statbuf, &ks, sizeof(ks)) != 0) return -(int64_t)EFAULT;
+    return 0;
+}
 
 int64_t sys_faccessat(struct syscall_frame *frame)
 {
     int dirfd = (int)frame->rdi;
     const char *pathname = (const char *)frame->rsi;
     int mode = (int)frame->rdx;
+    int flags = (int)frame->r10;
 
     if (!valid_access_mode(mode)) return -(int64_t)EINVAL;
     if (current_task == 0 || current_task->process == 0) return -(int64_t)EPERM;
 
     char kpath[PATH_MAX_LEN];
-    if (copy_from_user(kpath, pathname, PATH_MAX_LEN - 1) != 0) return -(int64_t)EFAULT;
+    if (copy_string_from_user(kpath, pathname, PATH_MAX_LEN) != 0) return -(int64_t)EFAULT;
     kpath[PATH_MAX_LEN - 1] = '\0';
 
-    if (dirfd != AT_FDCWD && !path_is_absolute(kpath)) {
-        return -(int64_t)ENOSYS;
-    }
-
-    struct vfs_node *node = vfs_lookup_at(current_task->process->cwd, kpath);
-    if (node == 0) return -(int64_t)ENOENT;
+    int err = 0;
+    bool follow = !(flags & 0x100); /* AT_SYMLINK_NOFOLLOW */
+    struct vfs_node *node = resolve_dirfd_ex(dirfd, kpath, follow, flags, &err);
+    if (node == 0) return err;
 
     if (mode == F_OK) return 0;
     if ((mode & X_OK) && node->type != VFS_TYPE_DIR && (node->mode & 0111) == 0) {
@@ -598,23 +716,26 @@ int64_t sys_readlinkat(struct syscall_frame *frame)
     char *buf = (char *)frame->rdx;
     size_t bufsiz = (size_t)frame->r10;
 
-    (void)buf;
     if (bufsiz == 0) return -(int64_t)EINVAL;
     if (current_task == 0 || current_task->process == 0) return -(int64_t)EPERM;
 
     char kpath[PATH_MAX_LEN];
-    if (copy_from_user(kpath, pathname, PATH_MAX_LEN - 1) != 0) return -(int64_t)EFAULT;
+    if (copy_string_from_user(kpath, pathname, PATH_MAX_LEN) != 0) return -(int64_t)EFAULT;
     kpath[PATH_MAX_LEN - 1] = '\0';
 
-    if (dirfd != AT_FDCWD && !path_is_absolute(kpath)) {
-        return -(int64_t)ENOSYS;
-    }
-
-    struct vfs_node *node = vfs_lookup_at(current_task->process->cwd, kpath);
-    if (node == 0) return -(int64_t)ENOENT;
+    int err = 0;
+    struct vfs_node *node = resolve_dirfd_ex(dirfd, kpath, false, 0, &err);
+    if (node == 0) return err;
     if (node->type != VFS_TYPE_LINK) return -(int64_t)EINVAL;
 
-    return -(int64_t)ENOSYS;
+    const char *target = (const char *)node->data;
+    if (target == 0) return -(int64_t)EINVAL;
+
+    size_t len = strlen(target);
+    size_t copy_len = len < bufsiz ? len : bufsiz;
+
+    if (copy_to_user(buf, target, copy_len) != 0) return -(int64_t)EFAULT;
+    return (int64_t)copy_len;
 }
 
 int64_t sys_readlink(struct syscall_frame *frame)
@@ -686,36 +807,18 @@ int64_t sys_statx(struct syscall_frame *frame)
     if (current_task == 0 || current_task->process == 0) return -(int64_t)EPERM;
     if (statxbuf == 0) return -(int64_t)EFAULT;
 
-    if ((flags & AT_EMPTY_PATH) && pathname == 0) {
-        if (dirfd < 0 || dirfd >= MAX_FILES_PER_PROCESS || current_task->process->files[dirfd] == 0) {
-            return -(int64_t)EBADF;
-        }
-        struct statx_linux sx;
-        fill_statx(&sx, current_task->process->files[dirfd]->node);
-        if (copy_to_user(statxbuf, &sx, sizeof(sx)) != 0) return -(int64_t)EFAULT;
-        return 0;
-    }
-
     char kpath[PATH_MAX_LEN];
-    if (copy_from_user(kpath, pathname, PATH_MAX_LEN - 1) != 0) return -(int64_t)EFAULT;
-    kpath[PATH_MAX_LEN - 1] = '\0';
-
-    if ((flags & AT_EMPTY_PATH) && kpath[0] == '\0') {
-        if (dirfd < 0 || dirfd >= MAX_FILES_PER_PROCESS || current_task->process->files[dirfd] == 0) {
-            return -(int64_t)EBADF;
-        }
-        struct statx_linux sx;
-        fill_statx(&sx, current_task->process->files[dirfd]->node);
-        if (copy_to_user(statxbuf, &sx, sizeof(sx)) != 0) return -(int64_t)EFAULT;
-        return 0;
+    if (pathname != 0) {
+        if (copy_string_from_user(kpath, pathname, PATH_MAX_LEN) != 0) return -(int64_t)EFAULT;
+        kpath[PATH_MAX_LEN - 1] = '\0';
+    } else {
+        kpath[0] = '\0';
     }
 
-    if (dirfd != AT_FDCWD && !path_is_absolute(kpath)) {
-        return -(int64_t)ENOSYS;
-    }
-
-    struct vfs_node *node = vfs_lookup_at(current_task->process->cwd, kpath);
-    if (node == 0) return -(int64_t)ENOENT;
+    int err = 0;
+    bool follow = !(flags & 0x100); /* AT_SYMLINK_NOFOLLOW */
+    struct vfs_node *node = resolve_dirfd_ex(dirfd, kpath, follow, flags, &err);
+    if (node == 0) return err;
 
     struct statx_linux sx;
     fill_statx(&sx, node);
@@ -731,38 +834,19 @@ int64_t sys_newfstatat(struct syscall_frame *frame)
     int flags = (int)frame->r10;
 
     if (current_task == 0 || current_task->process == 0) return -(int64_t)EPERM;
-    struct process *proc = current_task->process;
-
-    if ((flags & AT_EMPTY_PATH) && pathname == 0) {
-        if (dirfd < 0 || dirfd >= MAX_FILES_PER_PROCESS || proc->files[dirfd] == 0) {
-            return -(int64_t)EBADF;
-        }
-        struct stat ks;
-        fill_stat(&ks, proc->files[dirfd]->node);
-        if (copy_to_user(statbuf, &ks, sizeof(ks)) != 0) return -(int64_t)EFAULT;
-        return 0;
-    }
 
     char kpath[PATH_MAX_LEN];
-    if (copy_from_user(kpath, pathname, PATH_MAX_LEN - 1) != 0) return -(int64_t)EFAULT;
-    kpath[PATH_MAX_LEN - 1] = '\0';
-
-    if ((flags & AT_EMPTY_PATH) && kpath[0] == '\0') {
-        if (dirfd < 0 || dirfd >= MAX_FILES_PER_PROCESS || proc->files[dirfd] == 0) {
-            return -(int64_t)EBADF;
-        }
-        struct stat ks;
-        fill_stat(&ks, proc->files[dirfd]->node);
-        if (copy_to_user(statbuf, &ks, sizeof(ks)) != 0) return -(int64_t)EFAULT;
-        return 0;
+    if (pathname != 0) {
+        if (copy_string_from_user(kpath, pathname, PATH_MAX_LEN) != 0) return -(int64_t)EFAULT;
+        kpath[PATH_MAX_LEN - 1] = '\0';
+    } else {
+        kpath[0] = '\0';
     }
 
-    if (dirfd != AT_FDCWD && !path_is_absolute(kpath)) {
-        return -(int64_t)ENOSYS;
-    }
-
-    struct vfs_node *node = vfs_lookup_at(proc->cwd, kpath);
-    if (node == 0) return -(int64_t)ENOENT;
+    int err = 0;
+    bool follow = !(flags & 0x100); /* AT_SYMLINK_NOFOLLOW */
+    struct vfs_node *node = resolve_dirfd_ex(dirfd, kpath, follow, flags, &err);
+    if (node == 0) return err;
 
     struct stat ks;
     fill_stat(&ks, node);
@@ -964,98 +1048,89 @@ int64_t sys_ioctl(struct syscall_frame *frame)
     if (fd < 0 || fd >= MAX_FILES_PER_PROCESS || proc->files[fd] == 0)
         return -(int64_t)EBADF;
 
-    switch (req) {
-    case TIOCGWINSZ: {
-        struct winsize ws = { .ws_row = 24, .ws_col = 80, .ws_xpixel = 0, .ws_ypixel = 0 };
-        if (copy_to_user(argp, &ws, sizeof(ws)) != 0) return -(int64_t)EFAULT;
-        return 0;
+    struct file *f = proc->files[fd];
+    if (f->node != 0 && f->node->type == VFS_TYPE_CHAR &&
+        (strcmp(f->node->name, "tty") == 0 || strcmp(f->node->name, "console") == 0)) {
+        extern int tty_ioctl(uint64_t req, void *argp);
+        return tty_ioctl(req, argp);
     }
-    case TIOCSWINSZ:
-        return 0;  /* accept silently */
-    case TCGETS: {
-        /* Return sane cooked-mode defaults */
-        struct termios t;
-        memset(&t, 0, sizeof(t));
-        t.c_iflag = 0x500;   /* ICRNL | IXON */
-        t.c_oflag = 0x5;     /* OPOST | ONLCR */
-        t.c_cflag = 0xBF;    /* CS8 | CREAD | HUPCL */
-        t.c_lflag = 0x8A3B;  /* ISIG | ICANON | ECHO | ... */
-        t.c_cc[4] = 1;       /* VMIN */
-        if (copy_to_user(argp, &t, sizeof(t)) != 0) return -(int64_t)EFAULT;
-        return 0;
-    }
-    case TCSETS:
-    case TCSETSW:
-    case TCSETSF:
-        return 0;  /* accept silently */
-    case TIOCGPGRP: {
-        uint64_t pid = current_task->process->pid;
-        if (copy_to_user(argp, &pid, sizeof(int)) != 0) return -(int64_t)EFAULT;
-        return 0;
-    }
-    case TIOCSPGRP:
-        return 0;
-    default:
-        return -(int64_t)ENOSYS;
-    }
+
+    return -(int64_t)25; /* ENOTTY */
 }
 
 /* ------------------------------------------------------------------ */
 /* mkdir / rmdir / unlink / rename                                     */
 /* ------------------------------------------------------------------ */
 
-int64_t sys_mkdir(struct syscall_frame *frame)
+int64_t sys_mkdirat(struct syscall_frame *frame)
 {
-    const char *pathname = (const char *)frame->rdi;
-    /* mode (frame->rsi) ignored */
+    int dirfd = (int)frame->rdi;
+    const char *pathname = (const char *)frame->rsi;
+    mode_t mode = (mode_t)frame->rdx;
 
     if (current_task == 0 || current_task->process == 0) return -(int64_t)EPERM;
+    struct process *proc = current_task->process;
 
     char kpath[PATH_MAX_LEN];
-    if (copy_from_user(kpath, pathname, PATH_MAX_LEN - 1) != 0) return -(int64_t)EFAULT;
+    if (copy_string_from_user(kpath, pathname, PATH_MAX_LEN) != 0) return -(int64_t)EFAULT;
     kpath[PATH_MAX_LEN - 1] = '\0';
 
-    /* Make absolute */
     char abspath[PATH_MAX_LEN];
-    if (kpath[0] == '/') {
-        memcpy(abspath, kpath, strlen(kpath) + 1);
-    } else {
-        const char *cwd = current_task->process->cwd;
-        size_t clen = strlen(cwd);
-        memcpy(abspath, cwd, clen);
-        if (abspath[clen-1] != '/') abspath[clen++] = '/';
-        memcpy(abspath + clen, kpath, strlen(kpath) + 1);
-    }
+    int err = get_absolute_path_at(dirfd, kpath, abspath, sizeof(abspath));
+    if (err < 0) return err;
 
-    int ret = vfs_mkdir(abspath);
-    if (ret == -EEXIST) return -(int64_t)EEXIST;
-    if (ret != 0) return -(int64_t)ENOMEM;
+    char cleanpath[PATH_MAX_LEN];
+    vfs_canonicalize_path(abspath, cleanpath);
+
+    /* Check it doesn't already exist */
+    struct vfs_node *existing = vfs_lookup(cleanpath);
+    if (existing != 0) return -(int64_t)EEXIST;
+
+    struct vfs_node *node = vfs_create_file(cleanpath, VFS_TYPE_DIR, 0, 0);
+    if (node == 0) return -(int64_t)ENOMEM;
+
+    node->mode = S_IFDIR | ((mode & ~proc->umask) & 07777);
     return 0;
 }
 
-int64_t sys_rmdir(struct syscall_frame *frame)
+int64_t sys_mkdir(struct syscall_frame *frame)
 {
-    const char *pathname = (const char *)frame->rdi;
+    struct syscall_frame f = *frame;
+    f.rdx = frame->rsi; /* mode */
+    f.rsi = frame->rdi; /* pathname */
+    f.rdi = (uint64_t)(int64_t)AT_FDCWD;
+    return sys_mkdirat(&f);
+}
+
+int64_t sys_unlinkat(struct syscall_frame *frame)
+{
+    int dirfd = (int)frame->rdi;
+    const char *pathname = (const char *)frame->rsi;
+    int flags = (int)frame->rdx;
 
     if (current_task == 0 || current_task->process == 0) return -(int64_t)EPERM;
 
     char kpath[PATH_MAX_LEN];
-    if (copy_from_user(kpath, pathname, PATH_MAX_LEN - 1) != 0) return -(int64_t)EFAULT;
+    if (copy_string_from_user(kpath, pathname, PATH_MAX_LEN) != 0) return -(int64_t)EFAULT;
     kpath[PATH_MAX_LEN - 1] = '\0';
 
     char abspath[PATH_MAX_LEN];
-    if (kpath[0] == '/') {
-        memcpy(abspath, kpath, strlen(kpath) + 1);
+    int err = get_absolute_path_at(dirfd, kpath, abspath, sizeof(abspath));
+    if (err < 0) return err;
+
+    char cleanpath[PATH_MAX_LEN];
+    vfs_canonicalize_path(abspath, cleanpath);
+
+    struct vfs_node *node = vfs_lookup(cleanpath);
+    if (node == 0) return -(int64_t)ENOENT;
+
+    if (flags & 0x200) { /* AT_REMOVEDIR */
+        if (node->type != VFS_TYPE_DIR) return -(int64_t)ENOTDIR;
     } else {
-        const char *cwd = current_task->process->cwd;
-        size_t clen = strlen(cwd);
-        memcpy(abspath, cwd, clen);
-        if (abspath[clen-1] != '/') abspath[clen++] = '/';
-        memcpy(abspath + clen, kpath, strlen(kpath) + 1);
+        if (node->type == VFS_TYPE_DIR) return -(int64_t)EISDIR;
     }
 
-    /* vfs_unlink handles the "is dir" and "is empty" checks */
-    int ret = vfs_unlink(abspath);
+    int ret = vfs_unlink(cleanpath);
     if (ret == -ENOENT)    return -(int64_t)ENOENT;
     if (ret == -ENOTEMPTY) return -(int64_t)ENOTEMPTY;
     if (ret != 0)          return -(int64_t)EINVAL;
@@ -1064,49 +1139,279 @@ int64_t sys_rmdir(struct syscall_frame *frame)
 
 int64_t sys_unlink(struct syscall_frame *frame)
 {
-    const char *pathname = (const char *)frame->rdi;
+    struct syscall_frame f = *frame;
+    f.rdx = 0; /* flags = 0 */
+    f.rsi = frame->rdi; /* pathname */
+    f.rdi = (uint64_t)(int64_t)AT_FDCWD;
+    return sys_unlinkat(&f);
+}
+
+int64_t sys_rmdir(struct syscall_frame *frame)
+{
+    struct syscall_frame f = *frame;
+    f.rdx = 0x200; /* AT_REMOVEDIR */
+    f.rsi = frame->rdi; /* pathname */
+    f.rdi = (uint64_t)(int64_t)AT_FDCWD;
+    return sys_unlinkat(&f);
+}
+
+int64_t sys_renameat2(struct syscall_frame *frame)
+{
+    int olddirfd = (int)frame->rdi;
+    const char *oldpath = (const char *)frame->rsi;
+    int newdirfd = (int)frame->rdx;
+    const char *newpath = (const char *)frame->r10;
+    unsigned int flags = (unsigned int)frame->r8;
+
+    if (flags != 0) return -(int64_t)EINVAL;
 
     if (current_task == 0 || current_task->process == 0) return -(int64_t)EPERM;
 
-    char kpath[PATH_MAX_LEN];
-    if (copy_from_user(kpath, pathname, PATH_MAX_LEN - 1) != 0) return -(int64_t)EFAULT;
-    kpath[PATH_MAX_LEN - 1] = '\0';
+    char kold[PATH_MAX_LEN], knew[PATH_MAX_LEN];
+    if (copy_string_from_user(kold, oldpath, PATH_MAX_LEN) != 0) return -(int64_t)EFAULT;
+    if (copy_string_from_user(knew, newpath, PATH_MAX_LEN) != 0) return -(int64_t)EFAULT;
+    kold[PATH_MAX_LEN - 1] = '\0';
+    knew[PATH_MAX_LEN - 1] = '\0';
 
-    char abspath[PATH_MAX_LEN];
-    if (kpath[0] == '/') {
-        memcpy(abspath, kpath, strlen(kpath) + 1);
-    } else {
-        const char *cwd = current_task->process->cwd;
-        size_t clen = strlen(cwd);
-        memcpy(abspath, cwd, clen);
-        if (abspath[clen-1] != '/') abspath[clen++] = '/';
-        memcpy(abspath + clen, kpath, strlen(kpath) + 1);
-    }
+    char old_abspath[PATH_MAX_LEN];
+    int err = get_absolute_path_at(olddirfd, kold, old_abspath, sizeof(old_abspath));
+    if (err < 0) return err;
 
-    int ret = vfs_unlink(abspath);
+    char new_abspath[PATH_MAX_LEN];
+    err = get_absolute_path_at(newdirfd, knew, new_abspath, sizeof(new_abspath));
+    if (err < 0) return err;
+
+    char old_clean[PATH_MAX_LEN], new_clean[PATH_MAX_LEN];
+    vfs_canonicalize_path(old_abspath, old_clean);
+    vfs_canonicalize_path(new_abspath, new_clean);
+
+    int ret = vfs_rename(old_clean, new_clean);
     if (ret == -ENOENT) return -(int64_t)ENOENT;
     if (ret != 0)       return -(int64_t)EINVAL;
     return 0;
 }
 
+int64_t sys_renameat(struct syscall_frame *frame)
+{
+    struct syscall_frame f = *frame;
+    f.r8 = 0; /* flags = 0 */
+    return sys_renameat2(&f);
+}
+
 int64_t sys_rename(struct syscall_frame *frame)
 {
-    const char *oldpath = (const char *)frame->rdi;
-    const char *newpath = (const char *)frame->rsi;
+    struct syscall_frame f = *frame;
+    f.r8 = 0; /* flags = 0 */
+    f.r10 = frame->rsi; /* newpath */
+    f.rdx = (uint64_t)(int64_t)AT_FDCWD; /* newdirfd */
+    f.rsi = frame->rdi; /* oldpath */
+    f.rdi = (uint64_t)(int64_t)AT_FDCWD; /* olddirfd */
+    return sys_renameat2(&f);
+}
+
+int64_t sys_symlinkat(struct syscall_frame *frame)
+{
+    const char *target = (const char *)frame->rdi;
+    int newdirfd = (int)frame->rsi;
+    const char *linkpath = (const char *)frame->rdx;
 
     if (current_task == 0 || current_task->process == 0) return -(int64_t)EPERM;
 
-    char kold[PATH_MAX_LEN], knew[PATH_MAX_LEN];
-    if (copy_from_user(kold, oldpath, PATH_MAX_LEN - 1) != 0) return -(int64_t)EFAULT;
-    if (copy_from_user(knew, newpath, PATH_MAX_LEN - 1) != 0) return -(int64_t)EFAULT;
-    kold[PATH_MAX_LEN - 1] = '\0';
-    knew[PATH_MAX_LEN - 1] = '\0';
+    char ktarget[PATH_MAX_LEN];
+    if (copy_string_from_user(ktarget, target, PATH_MAX_LEN) != 0) return -(int64_t)EFAULT;
+    ktarget[PATH_MAX_LEN - 1] = '\0';
 
-    /* Note: only absolute paths for now */
-    int ret = vfs_rename(kold, knew);
-    if (ret == -ENOENT) return -(int64_t)ENOENT;
-    if (ret != 0)       return -(int64_t)EINVAL;
+    char klink[PATH_MAX_LEN];
+    if (copy_string_from_user(klink, linkpath, PATH_MAX_LEN) != 0) return -(int64_t)EFAULT;
+    klink[PATH_MAX_LEN - 1] = '\0';
+
+    char link_abspath[PATH_MAX_LEN];
+    int err = get_absolute_path_at(newdirfd, klink, link_abspath, sizeof(link_abspath));
+    if (err < 0) return err;
+
+    char link_clean[PATH_MAX_LEN];
+    vfs_canonicalize_path(link_abspath, link_clean);
+
+    /* Check if link already exists */
+    struct vfs_node *existing = vfs_lookup(link_clean);
+    if (existing != 0) return -(int64_t)EEXIST;
+
+    struct vfs_node *node = vfs_create_symlink(ktarget, link_clean);
+    if (node == 0) return -(int64_t)ENOMEM;
+    node->mode = S_IFLNK | 0777;
     return 0;
+}
+
+int64_t sys_symlink(struct syscall_frame *frame)
+{
+    struct syscall_frame f = *frame;
+    f.rdx = frame->rsi; /* linkpath */
+    f.rsi = (uint64_t)(int64_t)AT_FDCWD; /* newdirfd */
+    f.rdi = frame->rdi; /* target */
+    return sys_symlinkat(&f);
+}
+
+int64_t sys_fchmodat(struct syscall_frame *frame)
+{
+    int dirfd = (int)frame->rdi;
+    const char *pathname = (const char *)frame->rsi;
+    mode_t mode = (mode_t)frame->rdx;
+    int flags = (int)frame->r10;
+
+    if (current_task == 0 || current_task->process == 0) return -(int64_t)EPERM;
+
+    char kpath[PATH_MAX_LEN];
+    if (copy_string_from_user(kpath, pathname, PATH_MAX_LEN) != 0) return -(int64_t)EFAULT;
+    kpath[PATH_MAX_LEN - 1] = '\0';
+
+    int err = 0;
+    bool follow = !(flags & 0x100); /* AT_SYMLINK_NOFOLLOW */
+    struct vfs_node *node = resolve_dirfd_ex(dirfd, kpath, follow, flags, &err);
+    if (node == 0) return err;
+
+    node->mode = (node->mode & S_IFMT) | (mode & 07777);
+    return 0;
+}
+
+int64_t sys_chmod(struct syscall_frame *frame)
+{
+    struct syscall_frame f = *frame;
+    f.r10 = 0; /* flags */
+    f.rdx = frame->rsi; /* mode */
+    f.rsi = frame->rdi; /* pathname */
+    f.rdi = (uint64_t)(int64_t)AT_FDCWD;
+    return sys_fchmodat(&f);
+}
+
+int64_t sys_fchmod(struct syscall_frame *frame)
+{
+    int fd = (int)frame->rdi;
+    mode_t mode = (mode_t)frame->rsi;
+
+    if (current_task == 0 || current_task->process == 0) return -(int64_t)EPERM;
+    struct process *proc = current_task->process;
+
+    if (fd < 0 || fd >= MAX_FILES_PER_PROCESS || proc->files[fd] == 0)
+        return -(int64_t)EBADF;
+    struct file *f = proc->files[fd];
+    if (f->node == 0) return -(int64_t)EBADF;
+
+    f->node->mode = (f->node->mode & S_IFMT) | (mode & 07777);
+    return 0;
+}
+
+int64_t sys_chownat(struct syscall_frame *frame)
+{
+    int dirfd = (int)frame->rdi;
+    const char *pathname = (const char *)frame->rsi;
+    int32_t owner = (int32_t)frame->rdx;
+    int32_t group = (int32_t)frame->r10;
+    int flags = (int)frame->r8;
+
+    if (current_task == 0 || current_task->process == 0) return -(int64_t)EPERM;
+
+    char kpath[PATH_MAX_LEN];
+    if (copy_string_from_user(kpath, pathname, PATH_MAX_LEN) != 0) return -(int64_t)EFAULT;
+    kpath[PATH_MAX_LEN - 1] = '\0';
+
+    int err = 0;
+    bool follow = !(flags & 0x100); /* AT_SYMLINK_NOFOLLOW */
+    struct vfs_node *node = resolve_dirfd_ex(dirfd, kpath, follow, flags, &err);
+    if (node == 0) return err;
+
+    if (owner != -1) node->uid = (uint32_t)owner;
+    if (group != -1) node->gid = (uint32_t)group;
+    return 0;
+}
+
+int64_t sys_chown(struct syscall_frame *frame)
+{
+    struct syscall_frame f = *frame;
+    f.r8 = 0; /* flags = 0 */
+    f.r10 = frame->rdx; /* group */
+    f.rdx = frame->rsi; /* owner */
+    f.rsi = frame->rdi; /* pathname */
+    f.rdi = (uint64_t)(int64_t)AT_FDCWD;
+    return sys_chownat(&f);
+}
+
+int64_t sys_lchown(struct syscall_frame *frame)
+{
+    struct syscall_frame f = *frame;
+    f.r8 = 0x100; /* flags = AT_SYMLINK_NOFOLLOW */
+    f.r10 = frame->rdx; /* group */
+    f.rdx = frame->rsi; /* owner */
+    f.rsi = frame->rdi; /* pathname */
+    f.rdi = (uint64_t)(int64_t)AT_FDCWD;
+    return sys_chownat(&f);
+}
+
+int64_t sys_fchown(struct syscall_frame *frame)
+{
+    int fd = (int)frame->rdi;
+    int32_t owner = (int32_t)frame->rsi;
+    int32_t group = (int32_t)frame->rdx;
+
+    if (current_task == 0 || current_task->process == 0) return -(int64_t)EPERM;
+    struct process *proc = current_task->process;
+
+    if (fd < 0 || fd >= MAX_FILES_PER_PROCESS || proc->files[fd] == 0)
+        return -(int64_t)EBADF;
+    struct file *f = proc->files[fd];
+    if (f->node == 0) return -(int64_t)EBADF;
+
+    if (owner != -1) f->node->uid = (uint32_t)owner;
+    if (group != -1) f->node->gid = (uint32_t)group;
+    return 0;
+}
+
+int64_t sys_umask(struct syscall_frame *frame)
+{
+    mode_t mask = (mode_t)frame->rdi;
+    if (current_task == 0 || current_task->process == 0) return -(int64_t)EPERM;
+    struct process *proc = current_task->process;
+
+    uint32_t old = proc->umask;
+    proc->umask = mask & 0777;
+    return (int64_t)old;
+}
+
+int64_t sys_dup3(struct syscall_frame *frame)
+{
+    int oldfd = (int)frame->rdi;
+    int newfd = (int)frame->rsi;
+    int flags = (int)frame->rdx;
+
+    if (current_task == 0 || current_task->process == 0) return -(int64_t)EPERM;
+    struct process *proc = current_task->process;
+
+    if (oldfd == newfd) return -(int64_t)EINVAL;
+
+    if (oldfd < 0 || oldfd >= MAX_FILES_PER_PROCESS || proc->files[oldfd] == 0)
+        return -(int64_t)EBADF;
+    if (newfd < 0 || newfd >= MAX_FILES_PER_PROCESS)
+        return -(int64_t)EBADF;
+
+    if (flags & ~O_CLOEXEC) return -(int64_t)EINVAL;
+
+    /* Close newfd if already open */
+    if (proc->files[newfd] != 0) {
+        struct file *old = proc->files[newfd];
+        proc->files[newfd] = 0;
+        file_close(old);
+    }
+
+    struct file *f = proc->files[oldfd];
+    proc->files[newfd] = f;
+    f->ref_count++;
+
+    if (flags & O_CLOEXEC) {
+        proc->files[newfd]->fd_flags |= FD_CLOEXEC;
+    } else {
+        proc->files[newfd]->fd_flags &= ~FD_CLOEXEC;
+    }
+
+    return newfd;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1123,7 +1428,7 @@ int64_t sys_execve(struct syscall_frame *frame)
     char **envp = (char **)frame->rdx;
 
     char kpath[PATH_MAX_LEN];
-    if (copy_from_user(kpath, filename, PATH_MAX_LEN - 1) != 0) return -(int64_t)EFAULT;
+    if (copy_string_from_user(kpath, filename, PATH_MAX_LEN) != 0) return -(int64_t)EFAULT;
     kpath[PATH_MAX_LEN - 1] = '\0';
 
     if (current_task == 0 || current_task->process == 0) return -(int64_t)EPERM;
@@ -1141,11 +1446,10 @@ int64_t sys_execve(struct syscall_frame *frame)
             if (uptr == 0) break;
             char *kstr = kmalloc(MAX_ARG_LEN);
             if (kstr == 0) goto fail_argv;
-            if (copy_from_user(kstr, (const void *)uptr, MAX_ARG_LEN - 1) != 0) {
+            if (copy_string_from_user(kstr, (const char *)uptr, MAX_ARG_LEN) != 0) {
                 kfree(kstr);
                 goto fail_fault_argv;
             }
-            kstr[MAX_ARG_LEN - 1] = '\0';
             kargv[argc++] = kstr;
         }
     }
@@ -1163,11 +1467,10 @@ int64_t sys_execve(struct syscall_frame *frame)
             if (uptr == 0) break;
             char *kstr = kmalloc(MAX_ARG_LEN);
             if (kstr == 0) goto fail_envp;
-            if (copy_from_user(kstr, (const void *)uptr, MAX_ARG_LEN - 1) != 0) {
+            if (copy_string_from_user(kstr, (const char *)uptr, MAX_ARG_LEN) != 0) {
                 kfree(kstr);
                 goto fail_fault_envp;
             }
-            kstr[MAX_ARG_LEN - 1] = '\0';
             kenvp[envc++] = kstr;
         }
     }

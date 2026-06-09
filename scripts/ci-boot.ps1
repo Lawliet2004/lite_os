@@ -33,14 +33,16 @@ $failures = @()
 function Invoke-BootCheck {
     param([string]$Label, [string]$Target)
     Write-Host "[ci-boot] -> $Label"
+    Stop-Process -Name qemu-system-x86_64 -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 1
     $proc = Start-Process -FilePath 'make' -ArgumentList @($Target) `
         -NoNewWindow -Wait -PassThru `
-        -RedirectStandardOutput "$logPath.out" `
-        -RedirectStandardError "$logPath.err"
+        -RedirectStandardOutput "$logPath-$Target.out" `
+        -RedirectStandardError "$logPath-$Target.err"
     if ($proc.ExitCode -ne 0) {
         Write-Host "[ci-boot] $Label FAILED (exit=$($proc.ExitCode))" -ForegroundColor Red
         $script:failures += $Label
-        Get-Content "$logPath.err" -ErrorAction SilentlyContinue | Select-Object -Last 20
+        Get-Content "$logPath-$Target.err" -ErrorAction SilentlyContinue | Select-Object -Last 20
     } else {
         Write-Host "[ci-boot] $Label OK" -ForegroundColor Green
     }
@@ -49,6 +51,9 @@ function Invoke-BootCheck {
 Invoke-BootCheck -Label 'verify-boot'      -Target 'verify-boot'
 Invoke-BootCheck -Label 'verify-boot-vmm'  -Target 'verify-boot-vmm'
 Invoke-BootCheck -Label 'verify-boot-heap' -Target 'verify-boot-heap'
+
+# Cleanup any leftover QEMU process at exit
+Stop-Process -Name qemu-system-x86_64 -Force -ErrorAction SilentlyContinue
 
 $EndTs = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
 if ($failures.Count -gt 0) {

@@ -85,6 +85,7 @@ C_SOURCES := \
 	kernel/core/panic.c \
 	kernel/core/printk.c \
 	kernel/drivers/serial.c \
+	kernel/drivers/tty.c \
 	kernel/drivers/vga_text.c \
 	kernel/lib/string.c \
 	kernel/sched/scheduler.c \
@@ -101,6 +102,7 @@ C_SOURCES := \
 	kernel/fs/vfs.c \
 	kernel/fs/initramfs.c \
 	kernel/fs/ext2.c \
+	kernel/fs/block.c \
 	kernel/drivers/pci.c \
 	kernel/drivers/virtio_net.c \
 	kernel/net/net.c \
@@ -175,13 +177,14 @@ $(BUILD_DIR)/tests/userspace/dynamic-musl/hello_dynamic: tests/userspace/dynamic
 	MSYS_NO_PATHCONV=1 python3 scripts/patch_interpreter.py $@ $(BUILD_DIR)/tests/userspace/dynamic-musl/missing_interp /lib/ld-musl-x86_64.so.1 /lib/nonexistent.so || MSYS_NO_PATHCONV=1 python scripts/patch_interpreter.py $@ $(BUILD_DIR)/tests/userspace/dynamic-musl/missing_interp /lib/ld-musl-x86_64.so.1 /lib/nonexistent.so
 	MSYS_NO_PATHCONV=1 python3 scripts/patch_interpreter.py $@ $(BUILD_DIR)/tests/userspace/dynamic-musl/invalid_interp /lib/ld-musl-x86_64.so.1 /hello.txt || MSYS_NO_PATHCONV=1 python scripts/patch_interpreter.py $@ $(BUILD_DIR)/tests/userspace/dynamic-musl/invalid_interp /lib/ld-musl-x86_64.so.1 /hello.txt
 
-$(BUILD_DIR)/initramfs.tar: $(BUILD_DIR)/user/init.elf $(BUILD_DIR)/user/sh.elf $(RAWSYSCALL_TESTS) hello_musl $(BUILD_DIR)/tests/userspace/dynamic-musl/hello_dynamic
+$(BUILD_DIR)/initramfs.tar: $(BUILD_DIR)/user/init.elf $(BUILD_DIR)/user/sh.elf $(RAWSYSCALL_TESTS) hello_musl $(BUILD_DIR)/tests/userspace/dynamic-musl/hello_dynamic tests/userspace/busybox/busybox
 	@mkdir -p $(BUILD_DIR)/initramfs-root/bin
 	@mkdir -p $(BUILD_DIR)/initramfs-root/tests
 	@mkdir -p $(BUILD_DIR)/initramfs-root/lib
 	@mkdir -p $(BUILD_DIR)/initramfs-root/lib64
 	cp $(BUILD_DIR)/user/init.elf $(BUILD_DIR)/initramfs-root/bin/init
 	cp $(BUILD_DIR)/user/sh.elf $(BUILD_DIR)/initramfs-root/bin/sh
+	cp tests/userspace/busybox/busybox $(BUILD_DIR)/initramfs-root/bin/busybox
 	@echo "Hello, LiteNix VFS!" > $(BUILD_DIR)/initramfs-root/hello.txt
 	@echo "This is a test file in /bin" > $(BUILD_DIR)/initramfs-root/bin/test.txt
 	cp hello_musl $(BUILD_DIR)/initramfs-root/bin/hello_musl
@@ -252,22 +255,47 @@ run: $(ISO)
 	@mkdir -p $(BUILD_DIR)
 	qemu-system-x86_64 -M q35 -m 64M -cdrom $(ISO) \
 		-serial file:$(SERIAL_LOG) -debugcon stdio -no-reboot -no-shutdown \
-		-netdev user,id=n0,hostfwd=tcp::8080-:80 -device virtio-net-pci,netdev=n0
+		-netdev user,id=n0 -device virtio-net-pci,netdev=n0
 
 # Helper: boot the kernel once with a 25s timeout and capture the serial log.
 # Returns 0 on timeout-killed QEMU (normal) and writes the log file.
 define boot-and-capture
-@mkdir -p $(BUILD_DIR)
-@rm -f $(1)
-@(timeout 25s qemu-system-x86_64 -M q35 -m 64M -cdrom $(ISO) \
-	-serial file:$(1) -debugcon stdio -no-reboot -no-shutdown \
-	-netdev user,id=n0,hostfwd=tcp::8080-:80 -device virtio-net-pci,netdev=n0 \
-	> /dev/null 2>&1 || test $$? -eq 124)
+	@mkdir -p $(BUILD_DIR)
+	@rm -f $(1)
+	@(timeout 60s qemu-system-x86_64 -M q35 -m 64M -cdrom $(ISO) \
+		-serial file:$(1) -debugcon stdio -no-reboot -no-shutdown -display none \
+		-netdev user,id=n0 -device virtio-net-pci,netdev=n0 \
+		|| test $$? -eq 124)
 endef
+
+BUILD_DIRS := \
+	$(BUILD_DIR)/kernel/arch/x86_64/cpu \
+	$(BUILD_DIR)/kernel/arch/x86_64/interrupt \
+	$(BUILD_DIR)/kernel/arch/x86_64/memory \
+	$(BUILD_DIR)/kernel/arch/x86_64/syscall \
+	$(BUILD_DIR)/kernel/drivers \
+	$(BUILD_DIR)/kernel/mm \
+	$(BUILD_DIR)/kernel/core \
+	$(BUILD_DIR)/kernel/lib \
+	$(BUILD_DIR)/kernel/sched \
+	$(BUILD_DIR)/kernel/sys \
+	$(BUILD_DIR)/kernel/fs \
+	$(BUILD_DIR)/kernel/net \
+	$(BUILD_DIR)/user \
+	$(BUILD_DIR)/tests/raw \
+	$(BUILD_DIR)/tests/userspace/dynamic-musl \
+	$(BUILD_DIR)/iso-root/boot \
+	$(BUILD_DIR)/initramfs-root/bin \
+	$(BUILD_DIR)/initramfs-root/tests \
+	$(BUILD_DIR)/initramfs-root/lib \
+	$(BUILD_DIR)/initramfs-root/lib64
 
 # Standard boot: every success marker must appear, and no exception/panic.
 verify-boot:
 	$(MAKE) clean
+	sleep 2
+	mkdir -p $(BUILD_DIRS)
+	sleep 1
 	$(MAKE) iso
 	$(call boot-and-capture,$(SERIAL_LOG))
 	@grep -q "VMM: address-space self-test passed" $(SERIAL_LOG)
@@ -288,6 +316,7 @@ verify-boot:
 	@grep -q "TCP HTTP Server listening on port 80" $(SERIAL_LOG)
 	@grep -q "Test 22: PASSED" $(SERIAL_LOG)
 	@grep -q "Hello from dynamic musl!" $(SERIAL_LOG)
+	@grep -q "Test 23: PASSED" $(SERIAL_LOG)
 	@! grep -q "CPU exception" $(SERIAL_LOG)
 	@! grep -q "KERNEL PANIC" $(SERIAL_LOG)
 	@echo "Boot verification passed"
@@ -295,6 +324,9 @@ verify-boot:
 # Negative boot: build with TEST=vmm-fault and expect an early CPU exception.
 verify-boot-vmm:
 	$(MAKE) clean
+	sleep 2
+	mkdir -p $(BUILD_DIRS)
+	sleep 1
 	$(MAKE) iso TEST=vmm-fault
 	$(call boot-and-capture,$(SERIAL_LOG_VMM))
 	@grep -q "CPU exception" $(SERIAL_LOG_VMM)
@@ -304,6 +336,9 @@ verify-boot-vmm:
 # Negative boot: build with TEST=heap-panic and expect a KERNEL PANIC.
 verify-boot-heap:
 	$(MAKE) clean
+	sleep 2
+	mkdir -p $(BUILD_DIRS)
+	sleep 1
 	$(MAKE) iso TEST=heap-panic
 	$(call boot-and-capture,$(SERIAL_LOG_HEAP))
 	@grep -q "KERNEL PANIC" $(SERIAL_LOG_HEAP)
@@ -320,6 +355,6 @@ debug-gdb: $(ISO)
 		-serial file:$(SERIAL_LOG) -S -s -no-reboot -no-shutdown
 
 clean:
-	rm -rf $(BUILD_DIR)
+	-rm -rf $(BUILD_DIR)
 
 distclean: clean

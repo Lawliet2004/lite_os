@@ -80,9 +80,9 @@ For machine-readable scoreboard, see [compatibility_scoreboard.csv](./compatibil
 |-------------|----------------|-----------|-------------------|-----------|--------------------|---------------------|
 | **Raw Syscall Suite** (`test_all`) | Static | None (Direct) | `write`, `exit_group`, `openat`, `read`, `close`, `newfstatat`, `brk`, `mmap`, `munmap`, `getpid`, `gettid`, `uname`, `clock_gettime`, `nanosleep`, `getrandom` | **PASS** | 2026-06-08 | `RAWSYSCALL: all tests passed` |
 | **Static Musl Hello** (`hello_musl`) | Static | musl | `writev`, `exit_group`, `readv` | **PASS** | 2026-06-08 | `Hello from musl!\nargc = 3\nargv[0] = /bin/hello_musl` |
-| **Static BusyBox** | Static | musl | `chmod`, `fchmod`, `chown`, `statx`, `ioctl`, process groups, signals | **Fail (Target)** | 2026-06-08 | N/A (Blocked by Phase 5 syscalls) |
+| **Static BusyBox** | Static | musl | `chmod`, `fchmod`, `chown`, `fchown`, `lchown`, `umask`, `mkdirat`, `fchownat`, `unlinkat`, `renameat`, `symlinkat`, `readlinkat`, `fchmodat`, `dup3`, `renameat2`, `symlink`, `readlink` | **PASS** | 2026-06-09 | `Test 23: PASSED` printed in serial log |
 | **Dynamic Binary Test** | Dynamic | N/A | `mmap` (file-backed), `PT_INTERP` loader, auxiliary vectors | **PASS** | 2026-06-09 | `Dynamic kernel loader path works!` in serial log |
-| **Dynamic Musl Hello** | Dynamic | musl | Full musl dynamic linker, shared libs, relocation | **Fail (Target)** | 2026-06-09 | Kernel loader works; full musl ldso support deferred to Phase 3 |
+| **Dynamic Musl Hello** | Dynamic | musl | Full musl dynamic linker, shared libs, relocation | **PASS** | 2026-06-09 | `Hello from dynamic musl!` printed in serial log |
 | **BusyBox Shell** | Static | musl | `setsid`, `setpgid`, TTY line discipline, signal frame delivery | **Fail (Target)** | 2026-06-08 | N/A (Blocked by Phase 6 terminal / signals) |
 
 ---
@@ -92,8 +92,8 @@ For machine-readable scoreboard, see [compatibility_scoreboard.csv](./compatibil
 The following system calls have been verified and validated against bad user pointer inputs:
 
 - **Process / Thread**: `exit` (60), `exit_group` (231), `getpid` (39), `gettid` (186), `getppid` (110), `fork` (57), `wait4` (61), `clone` (56 - thread setup), `set_tid_address` (218).
-- **Filesystem**: `read` (0), `write` (1), `readv` (19), `writev` (20), `open` (2), `openat` (257), `close` (3), `lseek` (8), `stat` (4), `fstat` (5), `fstatat` (262), `statx` (332 - stub), `access` (21), `faccessat` (269), `readlink` (89 - stub), `getdents64` (217), `mkdir` (83), `unlink` (87), `rmdir` (84), `dup` (32), `dup2` (33).
-- **Memory**: `brk` (12), `mmap` (9 - anonymous memory / lazy demand paging), `munmap` (11).
+- **Filesystem**: `read` (0), `write` (1), `readv` (19), `writev` (20), `open` (2), `openat` (257), `close` (3), `lseek` (8), `stat` (4), `fstat` (5), `lstat` (6), `fstatat` (262), `statx` (332 - stub), `access` (21), `faccessat` (269), `readlink` (89), `readlinkat` (267), `getdents64` (217), `mkdir` (83), `mkdirat` (258), `unlink` (87), `unlinkat` (263), `rmdir` (84), `dup` (32), `dup2` (33), `dup3` (292), `chmod` (90), `fchmod` (91), `fchmodat` (268), `chown` (92), `fchown` (93), `lchown` (94), `fchownat` (260), `umask` (95), `renameat` (264), `renameat2` (316), `symlink` (88), `symlinkat` (266).
+- **Memory**: `brk` (12), `mmap` (9 - anonymous memory / lazy demand paging / file-backed MAP_PRIVATE), `munmap` (11).
 - **Time & Sync**: `clock_gettime` (228), `gettimeofday` (96), `nanosleep` (35), `futex` (202 - wait/wake).
 - **System**: `uname` (63), `getrandom` (318), `getrlimit` (97), `prlimit64` (302), `set_robust_list` (273), `get_robust_list` (274).
 

@@ -217,6 +217,11 @@ char *getcwd(char *buf, size_t size)
     return (ret < 0) ? 0 : buf;
 }
 
+int symlink(const char *target, const char *linkpath)
+{
+    return (int)syscall2(88, (int64_t)target, (int64_t)linkpath);
+}
+
 /* ------------------------------------------------------------------ */
 /* Process                                                              */
 /* ------------------------------------------------------------------ */
@@ -255,6 +260,57 @@ int gettid(void)
 int getppid(void)
 {
     return (int)syscall0(110);
+}
+
+int setpgid(int pid, int pgid)
+{
+    return (int)syscall2(109, (int64_t)pid, (int64_t)pgid);
+}
+
+int getpgid(int pid)
+{
+    return (int)syscall1(121, (int64_t)pid);
+}
+
+int setsid(void)
+{
+    return (int)syscall0(112);
+}
+
+int getsid(int pid)
+{
+    return (int)syscall1(124, (int64_t)pid);
+}
+
+__asm__(
+"    .global __restore_rt\n"
+"__restore_rt:\n"
+"    movq $15, %rax\n"
+"    syscall\n"
+);
+
+void __restore_rt(void);
+
+int sigaction(int signum, const struct sigaction *act, struct sigaction *oldact)
+{
+    struct sigaction kact;
+    if (act) {
+        kact = *act;
+        kact.sa_flags |= 0x04000000; // SA_RESTORER
+        kact.sa_restorer = __restore_rt;
+        act = &kact;
+    }
+    return (int)syscall4(13, (int64_t)signum, (int64_t)act, (int64_t)oldact, 8);
+}
+
+int sigprocmask(int how, const uint64_t *set, uint64_t *oldset)
+{
+    return (int)syscall4(14, (int64_t)how, (int64_t)set, (int64_t)oldset, 8);
+}
+
+int kill(int pid, int sig)
+{
+    return (int)syscall2(62, (int64_t)pid, (int64_t)sig);
 }
 
 int clone(unsigned long flags, void *child_stack, int *parent_tid, int *child_tid, unsigned long newtls)

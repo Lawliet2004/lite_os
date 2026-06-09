@@ -40,6 +40,7 @@
 #define EAGAIN  11
 #define ENOEXEC 8
 #define EOVERFLOW 75
+#define ENOTTY    25
 
 #define ENOTSOCK      88
 #define EDESTADDRREQ  89
@@ -107,6 +108,7 @@
 #define SYS_getegid      108
 #define SYS_rt_sigaction  13
 #define SYS_rt_sigprocmask 14
+#define SYS_rt_sigreturn  15
 #define SYS_kill          62
 #define SYS_exit_group  231
 #define SYS_getdents64  217
@@ -135,6 +137,27 @@
 #define SYS_nanosleep     35
 #define SYS_gettimeofday  96
 #define SYS_clock_gettime 228
+
+#define SYS_setpgid       109
+#define SYS_getpgid       121
+#define SYS_setsid        112
+#define SYS_getsid        124
+
+#define SYS_symlink       88
+#define SYS_chmod         90
+#define SYS_fchmod        91
+#define SYS_chown         92
+#define SYS_fchown        93
+#define SYS_lchown        94
+#define SYS_umask         95
+#define SYS_mkdirat      258
+#define SYS_chownat      260  /* fchownat */
+#define SYS_unlinkat     263
+#define SYS_renameat     264
+#define SYS_symlinkat    266
+#define SYS_fchmodat     268
+#define SYS_dup3         292
+#define SYS_renameat2    316
 
 /*
  * fcntl commands

@@ -17,6 +17,7 @@ typedef int64_t off_t;
 #define O_NONBLOCK  2048    /* 01000 */
 #define O_CLOEXEC   524288  /* 02000000 */
 #define O_DIRECTORY 65536   /* 0200000 */
+#define O_NOFOLLOW  131072  /* 0400000 */
 
 #define SEEK_SET 0
 #define SEEK_CUR 1
@@ -70,17 +71,22 @@ struct vfs_dirent {
 struct stat {
     uint64_t st_dev;
     uint64_t st_ino;
+    uint64_t st_nlink;
     uint32_t st_mode;
-    uint32_t st_nlink;
     uint32_t st_uid;
     uint32_t st_gid;
+    uint32_t __pad0;
     uint64_t st_rdev;
     int64_t  st_size;
     int64_t  st_blksize;
     int64_t  st_blocks;
     int64_t  st_atime;
+    uint64_t st_atime_nsec;
     int64_t  st_mtime;
+    uint64_t st_mtime_nsec;
     int64_t  st_ctime;
+    uint64_t st_ctime_nsec;
+    int64_t  __unused[3];
 };
 
 struct linux_dirent64 {
@@ -134,7 +140,9 @@ struct vfs_node *vfs_get_root(void);
 void vfs_canonicalize_path(const char *src, char *dst);
 struct vfs_node *vfs_lookup(const char *path);
 struct vfs_node *vfs_lookup_at(const char *cwd, const char *path);
+struct vfs_node *vfs_resolve_path_at(struct vfs_node *start_node, const char *path, bool follow_last_symlink, int *err_out);
 struct vfs_node *vfs_create_file(const char *path, uint32_t type, size_t size, const void *data);
+struct vfs_node *vfs_create_symlink(const char *target, const char *linkpath);
 struct vfs_node *vfs_create_device(const char *path, vfs_read_t read, vfs_write_t write);
 
 /* Directory / file mutation */

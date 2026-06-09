@@ -52,6 +52,32 @@ int copy_from_user(void *kdst, const void *usrc, size_t len)
     return vmm_copy_from_user(kdst, space, usrc, len);
 }
 
+int copy_string_from_user(char *kdst, const char *usrc, size_t max_len)
+{
+    if (kdst == 0 || usrc == 0 || max_len == 0) return -1;
+
+    struct address_space *space = 0;
+    struct task *curr = current_task;
+    if (curr != 0 && curr->process != 0) {
+        space = curr->process->address_space;
+    }
+    if (space == 0) {
+        space = vmm_kernel_address_space();
+    }
+
+    /* Read byte by byte so validation only covers bytes we actually read */
+    for (size_t i = 0; i < max_len; i++) {
+        if (!uaccess_ok(usrc + i, 1)) return -1;
+        uint8_t c;
+        if (vmm_copy_from_user(&c, space, usrc + i, 1) != 0) return -1;
+        kdst[i] = (char)c;
+        if (c == '\0') return 0;
+    }
+    /* String too long — ensure NUL-termination and signal truncation as fault */
+    kdst[max_len - 1] = '\0';
+    return -1;
+}
+
 int copy_to_user(void *udst, const void *ksrc, size_t len)
 {
     if (ksrc == 0) return -1;

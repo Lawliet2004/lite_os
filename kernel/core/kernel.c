@@ -271,7 +271,11 @@ void kernel_main(void)
     pic_mask_all();
     pic_unmask_irq(0);
     pic_unmask_irq(1);
+    pic_unmask_irq(4); /* Enable COM1 serial interrupts */
     printk("PIC: remapped\n");
+
+    extern void tty_init(void);
+    tty_init();
 
     pit_init(PIT_DEFAULT_HZ);
     printk("PIT: initialized at %u Hz\n", PIT_DEFAULT_HZ);

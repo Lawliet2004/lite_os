@@ -61,9 +61,8 @@ int64_t sys_chdir(struct syscall_frame *frame)
         return -(int64_t)EPERM;
 
     char kpath[TASK_CWD_MAX];
-    int err = copy_from_user(kpath, path, TASK_CWD_MAX - 1);
+    int err = copy_string_from_user(kpath, path, TASK_CWD_MAX);
     if (err != 0) return -(int64_t)EFAULT;
-    kpath[TASK_CWD_MAX - 1] = '\0';
 
     char abspath[512];
     if (kpath[0] == '/') {
@@ -125,15 +124,6 @@ int64_t sys_getcwd(struct syscall_frame *frame)
 #define SIG_UNBLOCK 1
 #define SIG_SETMASK 2
 
-struct sigaction_linux {
-    void (*sa_handler)(int);
-    uint64_t sa_flags;
-    void (*sa_restorer)(void);
-    uint64_t sa_mask;
-};
-
-static struct sigaction_linux global_sigactions[64];
-
 int64_t sys_rt_sigaction(struct syscall_frame *frame)
 {
     int sig = (int)frame->rdi;
@@ -150,11 +140,15 @@ int64_t sys_rt_sigaction(struct syscall_frame *frame)
         return -(int64_t)EINVAL;
     }
 
+    struct task *task = current_task;
+    if (task == 0 || task->process == 0) return -(int64_t)EPERM;
+    struct process *proc = task->process;
+
     if (oact != 0) {
         if (!uaccess_ok(oact, sizeof(struct sigaction_linux))) {
             return -(int64_t)EFAULT;
         }
-        if (copy_to_user(oact, &global_sigactions[sig], sizeof(struct sigaction_linux)) != 0) {
+        if (copy_to_user(oact, &proc->sigactions[sig], sizeof(struct sigaction_linux)) != 0) {
             return -(int64_t)EFAULT;
         }
     }
@@ -167,7 +161,7 @@ int64_t sys_rt_sigaction(struct syscall_frame *frame)
         if (copy_from_user(&new_act, act, sizeof(struct sigaction_linux)) != 0) {
             return -(int64_t)EFAULT;
         }
-        global_sigactions[sig] = new_act;
+        proc->sigactions[sig] = new_act;
     }
 
     return 0;
@@ -220,6 +214,44 @@ int64_t sys_rt_sigprocmask(struct syscall_frame *frame)
     }
 
     return 0;
+}
+
+int64_t sys_rt_sigreturn(struct syscall_frame *frame)
+{
+    struct task *task = current_task;
+    if (task == 0 || task->process == 0) return -(int64_t)EPERM;
+
+    /* The user stack pointer points to &user_frame->info when sigreturn is called.
+       So the start of the sigframe is exactly at frame->user_rsp - 8. */
+    struct rt_sigframe *user_frame = (struct rt_sigframe *)(frame->user_rsp - 8);
+    struct ucontext_linux uc;
+
+    if (copy_from_user(&uc, &user_frame->uc, sizeof(struct ucontext_linux)) != 0) {
+        return -(int64_t)EFAULT;
+    }
+
+    struct sigcontext_linux *sc = &uc.uc_mcontext;
+    frame->r8 = sc->r8;
+    frame->r9 = sc->r9;
+    frame->r10 = sc->r10;
+    frame->r11 = sc->r11;
+    frame->r12 = sc->r12;
+    frame->r13 = sc->r13;
+    frame->r14 = sc->r14;
+    frame->r15 = sc->r15;
+    frame->rdi = sc->rdi;
+    frame->rsi = sc->rsi;
+    frame->rbp = sc->rbp;
+    frame->rbx = sc->rbx;
+    frame->rdx = sc->rdx;
+    frame->rax = sc->rax;
+    frame->rcx = sc->rip;      // restore RIP into RCX for SYSRETQ
+    frame->r11 = sc->eflags;   // restore RFLAGS into R11 for SYSRETQ
+    frame->user_rsp = sc->rsp;  // restore user stack pointer
+
+    task->signal_blocked = uc.uc_sigmask;
+
+    return (int64_t)frame->rax;
 }
 
 int64_t sys_kill(struct syscall_frame *frame)
@@ -618,4 +650,82 @@ int64_t sys_nanosleep(struct syscall_frame *frame)
     }
 
     return 0;
+}
+
+int64_t sys_setpgid(struct syscall_frame *frame)
+{
+    uint64_t pid  = frame->rdi;
+    uint64_t pgid = frame->rsi;
+
+    if (current_task == 0 || current_task->process == 0) return -(int64_t)EPERM;
+    struct process *caller = current_task->process;
+
+    struct process *target = 0;
+    if (pid == 0 || pid == caller->pid) {
+        target = caller;
+    } else {
+        target = find_process(pid);
+        if (target == 0) return -(int64_t)ESRCH;
+    }
+
+    if (pgid == 0) {
+        pgid = target->pid;
+    }
+
+    target->pgid = (uint32_t)pgid;
+    return 0;
+}
+
+int64_t sys_getpgid(struct syscall_frame *frame)
+{
+    uint64_t pid = frame->rdi;
+
+    if (current_task == 0 || current_task->process == 0) return -(int64_t)EPERM;
+    struct process *caller = current_task->process;
+
+    struct process *target = 0;
+    if (pid == 0 || pid == caller->pid) {
+        target = caller;
+    } else {
+        target = find_process(pid);
+        if (target == 0) return -(int64_t)ESRCH;
+    }
+
+    return (int64_t)target->pgid;
+}
+
+int64_t sys_setsid(struct syscall_frame *frame)
+{
+    (void)frame;
+    if (current_task == 0 || current_task->process == 0) return -(int64_t)EPERM;
+    struct process *caller = current_task->process;
+
+    /* If process is already a group leader, setsid fails with EPERM */
+    if (caller->pgid == caller->pid) {
+        /* Accept it or return EPERM. Let's return EPERM to be POSIX compliant,
+           but if some apps fail, we can check. Returning EPERM is standard. */
+        return -(int64_t)EPERM;
+    }
+
+    caller->pgid = (uint32_t)caller->pid;
+    caller->sid  = (uint32_t)caller->pid;
+    return (int64_t)caller->sid;
+}
+
+int64_t sys_getsid(struct syscall_frame *frame)
+{
+    uint64_t pid = frame->rdi;
+
+    if (current_task == 0 || current_task->process == 0) return -(int64_t)EPERM;
+    struct process *caller = current_task->process;
+
+    struct process *target = 0;
+    if (pid == 0 || pid == caller->pid) {
+        target = caller;
+    } else {
+        target = find_process(pid);
+        if (target == 0) return -(int64_t)ESRCH;
+    }
+
+    return (int64_t)target->sid;
 }

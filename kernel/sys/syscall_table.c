@@ -1,7 +1,9 @@
+#define SYSCALL_TRACE
 #include <sys/syscall.h>
 #include <sys/syscall_table.h>
 #include <kernel/printk.h>
 #include <sched/task.h>
+
 
 /* ------------------------------------------------------------------ */
 /* Human-readable syscall name lookup                                  */
@@ -39,6 +41,21 @@ static __attribute__((unused)) const char *syscall_name(unsigned nr)
     case SYS_unlink:     return "unlink";
     case SYS_chdir:      return "chdir";
     case SYS_getcwd:     return "getcwd";
+    case SYS_symlink:    return "symlink";
+    case SYS_chmod:      return "chmod";
+    case SYS_fchmod:     return "fchmod";
+    case SYS_chown:      return "chown";
+    case SYS_fchown:     return "fchown";
+    case SYS_lchown:     return "lchown";
+    case SYS_umask:      return "umask";
+    case SYS_mkdirat:    return "mkdirat";
+    case SYS_chownat:    return "fchownat";
+    case SYS_unlinkat:   return "unlinkat";
+    case SYS_renameat:   return "renameat";
+    case SYS_symlinkat:  return "symlinkat";
+    case SYS_fchmodat:   return "fchmodat";
+    case SYS_dup3:       return "dup3";
+    case SYS_renameat2:  return "renameat2";
 
     /* ---- Memory ---- */
     case SYS_mmap:       return "mmap";
@@ -62,10 +79,15 @@ static __attribute__((unused)) const char *syscall_name(unsigned nr)
     case SYS_clone:      return "clone";
     case SYS_arch_prctl: return "arch_prctl";
     case SYS_set_tid_address: return "set_tid_address";
+    case SYS_setpgid:    return "setpgid";
+    case SYS_getpgid:    return "getpgid";
+    case SYS_setsid:     return "setsid";
+    case SYS_getsid:     return "getsid";
 
     /* ---- Signals ---- */
     case SYS_rt_sigaction:  return "rt_sigaction";
     case SYS_rt_sigprocmask: return "rt_sigprocmask";
+    case SYS_rt_sigreturn:  return "rt_sigreturn";
     case SYS_kill:          return "kill";
 
     /* ---- Threads & Sync ---- */
@@ -182,6 +204,21 @@ int64_t sys_readlinkat(struct syscall_frame *frame);
 int64_t sys_statx(struct syscall_frame *frame);
 int64_t sys_readv(struct syscall_frame *frame);
 int64_t sys_writev(struct syscall_frame *frame);
+int64_t sys_symlink(struct syscall_frame *frame);
+int64_t sys_chmod(struct syscall_frame *frame);
+int64_t sys_fchmod(struct syscall_frame *frame);
+int64_t sys_chown(struct syscall_frame *frame);
+int64_t sys_fchown(struct syscall_frame *frame);
+int64_t sys_lchown(struct syscall_frame *frame);
+int64_t sys_umask(struct syscall_frame *frame);
+int64_t sys_mkdirat(struct syscall_frame *frame);
+int64_t sys_chownat(struct syscall_frame *frame);
+int64_t sys_unlinkat(struct syscall_frame *frame);
+int64_t sys_renameat(struct syscall_frame *frame);
+int64_t sys_symlinkat(struct syscall_frame *frame);
+int64_t sys_fchmodat(struct syscall_frame *frame);
+int64_t sys_dup3(struct syscall_frame *frame);
+int64_t sys_renameat2(struct syscall_frame *frame);
 
 /* process lifecycle (sys_exit.c) */
 int64_t sys_exit(struct syscall_frame *frame);
@@ -197,6 +234,10 @@ int64_t sys_getuid(struct syscall_frame *frame);
 int64_t sys_getgid(struct syscall_frame *frame);
 int64_t sys_geteuid(struct syscall_frame *frame);
 int64_t sys_getegid(struct syscall_frame *frame);
+int64_t sys_setpgid(struct syscall_frame *frame);
+int64_t sys_getpgid(struct syscall_frame *frame);
+int64_t sys_setsid(struct syscall_frame *frame);
+int64_t sys_getsid(struct syscall_frame *frame);
 int64_t sys_chdir(struct syscall_frame *frame);
 int64_t sys_getcwd(struct syscall_frame *frame);
 int64_t sys_clone(struct syscall_frame *frame);
@@ -228,6 +269,7 @@ int64_t sys_listen(struct syscall_frame *frame);
 /* Signals */
 int64_t sys_rt_sigaction(struct syscall_frame *frame);
 int64_t sys_rt_sigprocmask(struct syscall_frame *frame);
+int64_t sys_rt_sigreturn(struct syscall_frame *frame);
 int64_t sys_kill(struct syscall_frame *frame);
 
 /* memory (sys_mem.c) */
@@ -292,6 +334,21 @@ void syscall_table_init(void)
     syscall_table[SYS_unlink]    = sys_unlink;
     syscall_table[SYS_chdir]     = sys_chdir;
     syscall_table[SYS_getcwd]    = sys_getcwd;
+    syscall_table[SYS_symlink]   = sys_symlink;
+    syscall_table[SYS_chmod]     = sys_chmod;
+    syscall_table[SYS_fchmod]    = sys_fchmod;
+    syscall_table[SYS_chown]     = sys_chown;
+    syscall_table[SYS_fchown]    = sys_fchown;
+    syscall_table[SYS_lchown]    = sys_lchown;
+    syscall_table[SYS_umask]     = sys_umask;
+    syscall_table[SYS_mkdirat]   = sys_mkdirat;
+    syscall_table[SYS_chownat]   = sys_chownat;
+    syscall_table[SYS_unlinkat]  = sys_unlinkat;
+    syscall_table[SYS_renameat]  = sys_renameat;
+    syscall_table[SYS_symlinkat] = sys_symlinkat;
+    syscall_table[SYS_fchmodat]  = sys_fchmodat;
+    syscall_table[SYS_dup3]      = sys_dup3;
+    syscall_table[SYS_renameat2] = sys_renameat2;
 
     /* ---- Process ---- */
     syscall_table[SYS_getpid]    = sys_getpid;
@@ -306,10 +363,15 @@ void syscall_table_init(void)
     syscall_table[SYS_exit]      = sys_exit;
     syscall_table[SYS_exit_group]= sys_exit_group;
     syscall_table[SYS_wait4]     = sys_wait4;
+    syscall_table[SYS_setpgid]   = sys_setpgid;
+    syscall_table[SYS_getpgid]   = sys_getpgid;
+    syscall_table[SYS_setsid]    = sys_setsid;
+    syscall_table[SYS_getsid]    = sys_getsid;
 
     /* ---- Signals ---- */
     syscall_table[SYS_rt_sigaction]   = sys_rt_sigaction;
     syscall_table[SYS_rt_sigprocmask]  = sys_rt_sigprocmask;
+    syscall_table[SYS_rt_sigreturn]    = sys_rt_sigreturn;
     syscall_table[SYS_kill]            = sys_kill;
 
     /* ---- Threads & TLS ---- */
@@ -356,13 +418,8 @@ int64_t syscall_dispatch(struct syscall_frame *frame)
     }
 
 #ifdef SYSCALL_TRACE
-    if (nr != SYS_write) { /* suppress write spam for the brief line */
-        printk("syscall: nr=%llu ret=%lld\n",
-               (unsigned long long)nr, (long long)ret);
-    }
-    /* Second diagnostic line: only when ret < 0 (failed syscall) */
-    if (ret < 0) {
-        printk("syscall: nr=%llu name=%s args=(rdi=%llx rsi=%llx rdx=%llx r10=%llx r8=%llx r9=%llx) ret=%lld errno=%s\n",
+    if (nr != SYS_write) {
+        printk("syscall: nr=%llu name=%s args=(rdi=%llx rsi=%llx rdx=%llx r10=%llx r8=%llx r9=%llx) ret=%lld\n",
                (unsigned long long)nr,
                syscall_name(nr),
                (unsigned long long)frame->rdi,
@@ -371,13 +428,14 @@ int64_t syscall_dispatch(struct syscall_frame *frame)
                (unsigned long long)frame->r10,
                (unsigned long long)frame->r8,
                (unsigned long long)frame->r9,
-               (long long)ret,
-               errno_name(ret));
+               (long long)ret);
     }
 #endif
 
+    frame->rax = ret;
+
     if (current_task && current_task->mode == TASK_MODE_USER) {
-        task_deliver_signals();
+        task_deliver_signals(frame);
     }
 
     return ret;

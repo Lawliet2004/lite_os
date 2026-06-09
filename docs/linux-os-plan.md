@@ -30,12 +30,13 @@ and compatibility tests all agree.
 | **Phase 5: File-backed mmap** | **Completed** | File-backed mmap MAP_PRIVATE with COW page fault loading; offset alignment validated. |
 | **Phase 6: Dynamic Linker Support** | **Completed** | PT_INTERP detection, interpreter loading with base address for ET_DYN, full auxiliary vector (AT_PHDR, AT_PHENT, AT_PHNUM, AT_BASE, AT_ENTRY, AT_RANDOM, AT_EXECFN, AT_UID, AT_EUID, AT_GID, AT_EGID, AT_SECURE), SysV stack alignment. Tested with fake interpreter. |
 
+| **Phase 7: Process Groups, Signals, TTY** | **Completed** | Process groups, signal actions/delivery, and basic terminal line discipline implemented. BusyBox shell runs. |
+
 ## Immediate Work Queue
 
 1. Maintain stable build and boot verification matrix on host.
-2. Complete file-backed `mmap` and VMA tracking (Phase 4).
-3. Test dynamic musl binaries (Phase 5).
-4. Expand signals and process group compatibility (Phase 6).
+2. Complete persistent disk-backed root filesystem and VirtualBox compatibility.
+3. Enhance networking maturity (procfs/sysfs/TCP/sockets).
 
 ## Current Slice
 

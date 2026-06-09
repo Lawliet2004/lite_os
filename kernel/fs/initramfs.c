@@ -30,7 +30,11 @@ struct tar_header {
 static size_t parse_octal(const char *str, int size)
 {
     size_t val = 0;
-    for (int i = 0; i < size; i++) {
+    int i = 0;
+    while (i < size && str[i] == ' ') {
+        i++;
+    }
+    for (; i < size; i++) {
         if (str[i] == '\0' || str[i] == ' ') {
             break;
         }
@@ -124,13 +128,35 @@ void initramfs_init(void)
         uint32_t type = VFS_TYPE_FILE;
         if (typeflag == '5') {
             type = VFS_TYPE_DIR;
+        } else if (typeflag == '2') {
+            type = VFS_TYPE_LINK;
         }
 
         uint8_t *data = ptr + 512;
-        struct vfs_node *node = vfs_create_file(full_path, type, file_size, data);
+        size_t size = file_size;
+        if (type == VFS_TYPE_LINK) {
+            data = (uint8_t *)header->linkname;
+            size = strlen(header->linkname) + 1;
+        }
+
+        struct vfs_node *node = vfs_create_file(full_path, type, size, data);
         if (node != 0) {
-            printk("VFS: mounted %s (type=%s, size=%llu bytes)\n",
-                   full_path, type == VFS_TYPE_DIR ? "DIR" : "FILE", (unsigned long long)file_size);
+            size_t mode_val = parse_octal(header->mode, 8);
+            if (mode_val == 0) {
+                mode_val = (type == VFS_TYPE_DIR) ? 0755 : (type == VFS_TYPE_LINK ? 0777 : 0644);
+            }
+            if (type == VFS_TYPE_FILE && (memcmp(full_path, "/bin/", 5) == 0 || memcmp(full_path, "/tests/", 7) == 0)) {
+                mode_val |= 0555; // Ensure readable and executable
+            }
+            if (type == VFS_TYPE_DIR) {
+                node->mode = S_IFDIR | (mode_val & 07777);
+            } else if (type == VFS_TYPE_LINK) {
+                node->mode = S_IFLNK | (mode_val & 07777);
+            } else {
+                node->mode = S_IFREG | (mode_val & 07777);
+            }
+            printk("VFS: mounted %s (type=%s, size=%llu bytes, mode=%x)\n",
+                   full_path, type == VFS_TYPE_DIR ? "DIR" : type == VFS_TYPE_LINK ? "LINK" : "FILE", (unsigned long long)size, (unsigned int)node->mode);
         } else {
             printk("VFS: failed to mount %s\n", full_path);
         }

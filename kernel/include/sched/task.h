@@ -1,6 +1,7 @@
 #ifndef LITENIX_SCHED_TASK_H
 #define LITENIX_SCHED_TASK_H
 
+#include <sys/signal.h>
 #include <arch/x86_64/vmm.h>
 #include <stdint.h>
 #include <stdbool.h>
@@ -73,11 +74,17 @@ struct process {
     /* Current working directory (absolute path, always starts with /) */
     char cwd[TASK_CWD_MAX];
 
+    uint32_t umask;
+
+    uint32_t pgid;
+    uint32_t sid;
+
     /* Heap (brk) tracking */
     uint64_t heap_start;  /* set by ELF loader: page-aligned end of BSS */
     uint64_t heap_end;    /* current brk pointer */
 
     struct vma vmas[VMA_MAX];
+    struct sigaction_linux sigactions[64];
 };
 
 struct task {
@@ -180,7 +187,8 @@ void task_sleep_ticks(uint64_t ticks);
 /* Phase 16: Signal APIs */
 struct process *find_process(uint64_t pid);
 void task_send_signal(struct task *task, int sig);
-void task_deliver_signals(void);
+void task_send_signal_pgid(uint32_t pgid, int sig);
+void task_deliver_signals(struct syscall_frame *frame);
 int futex_wake_address(uint32_t *uaddr, int val);
 
 extern struct task *current_task;

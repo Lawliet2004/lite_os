@@ -37,6 +37,9 @@ struct process *process_create_with_parent(struct process *parent)
     process->exit_code = 0;
     process->heap_start = 0;
     process->heap_end = 0;
+    process->umask = 022;
+    process->pgid = process->pid;
+    process->sid = process->pid;
 
     /* Default cwd to root */
     process->cwd[0] = '/';
@@ -49,6 +52,14 @@ struct process *process_create_with_parent(struct process *parent)
     if (parent != 0) {
         process->sibling = parent->children;
         parent->children = process;
+        process->umask = parent->umask;
+        if (parent->pid > 1) {
+            process->pgid = parent->pgid;
+            process->sid = parent->sid;
+        }
+        for (int i = 0; i < 64; i++) {
+            process->sigactions[i] = parent->sigactions[i];
+        }
 
         /* Inherit cwd from parent */
         int ci = 0;
@@ -731,6 +742,7 @@ struct task *task_fork(struct syscall_frame *parent_frame)
     child_task->sleep_next = 0;
     child_task->signal_blocked = parent_task->signal_blocked;
     child_task->signal_pending = 0;
+    child_task->fs_base = parent_task->fs_base;
 
     child_process->main_thread = child_task;
 
@@ -888,24 +900,112 @@ void task_send_signal(struct task *task, int sig)
     restore_interrupts(was_enabled);
 }
 
-void task_deliver_signals(void)
+static void send_signal_pgid_rec(struct process *root, uint32_t pgid, int sig)
+{
+    if (root == 0) return;
+    if (root->pgid == pgid && root->main_thread != 0) {
+        task_send_signal(root->main_thread, sig);
+    }
+    struct process *child = root->children;
+    while (child != 0) {
+        send_signal_pgid_rec(child, pgid, sig);
+        child = child->sibling;
+    }
+}
+
+void task_send_signal_pgid(uint32_t pgid, int sig)
+{
+    send_signal_pgid_rec(init_process, pgid, sig);
+}
+
+void task_deliver_signals(struct syscall_frame *frame)
 {
     struct task *task = current_task;
-    if (task == 0 || task->state != TASK_RUNNING) return;
+    if (task == 0 || task->state != TASK_RUNNING || task->process == 0) return;
 
     uint64_t active = task->signal_pending & ~task->signal_blocked;
     if (active == 0) return;
 
     for (int sig = 1; sig < 64; sig++) {
         if (active & (1ULL << sig)) {
-            task->signal_pending &= ~(1ULL << sig);
+            struct sigaction_linux *act = &task->process->sigactions[sig];
 
-            if (sig == 17) { // SIGCHLD
+            if (act->sa_handler == (void *)1) { // SIG_IGN
+                task->signal_pending &= ~(1ULL << sig);
                 continue;
             }
 
-            printk("Task %s (PID %llu) killed by signal %d\n", task->name, task->pid, sig);
-            task_exit(-sig);
+            if (act->sa_handler == (void *)0) { // SIG_DFL
+                task->signal_pending &= ~(1ULL << sig);
+                if (sig == 17 || sig == 23 || sig == 28) { // SIGCHLD, SIGURG, SIGWINCH
+                    continue;
+                }
+                printk("Task %s (PID %llu) killed by default signal %d\n", task->name, task->pid, sig);
+                task_exit(-sig);
+            }
+
+            /* Custom handler - only deliver if we have a valid syscall frame */
+            if (frame == 0) {
+                continue;
+            }
+
+            task->signal_pending &= ~(1ULL << sig);
+
+            /* Setup stack frame */
+            uint64_t old_rsp = frame->user_rsp;
+            uint64_t frame_size = sizeof(struct rt_sigframe);
+            uint64_t new_rsp = (old_rsp - frame_size) & ~15ULL;
+
+            if (!uaccess_ok((void *)new_rsp, frame_size)) {
+                printk("Signal: stack overflow or bad stack address %llx\n", new_rsp);
+                task_exit(-11); // SIGSEGV
+            }
+
+            struct rt_sigframe kframe;
+            memset(&kframe, 0, sizeof(struct rt_sigframe));
+
+            kframe.pretend_retaddr = act->sa_restorer;
+            kframe.info.si_signo = sig;
+            kframe.info.si_code = 0; // SI_USER
+            kframe.uc.uc_sigmask = task->signal_blocked;
+
+            struct sigcontext_linux *sc = &kframe.uc.uc_mcontext;
+            sc->r8 = frame->r8;
+            sc->r9 = frame->r9;
+            sc->r10 = frame->r10;
+            sc->r11 = frame->r11;
+            sc->r12 = frame->r12;
+            sc->r13 = frame->r13;
+            sc->r14 = frame->r14;
+            sc->r15 = frame->r15;
+            sc->rdi = frame->rdi;
+            sc->rsi = frame->rsi;
+            sc->rbp = frame->rbp;
+            sc->rbx = frame->rbx;
+            sc->rdx = frame->rdx;
+            sc->rax = frame->rax;
+            sc->rcx = frame->rcx;
+            sc->rsp = old_rsp;
+            sc->rip = frame->rcx;   // saved RIP is in RCX on entry
+            sc->eflags = frame->r11; // saved RFLAGS is in R11 on entry
+            sc->cs = 0x33;
+            sc->ss = 0x2b;
+
+            if (copy_to_user((void *)new_rsp, &kframe, sizeof(struct rt_sigframe)) != 0) {
+                printk("Signal: failed to copy sigframe to user stack\n");
+                task_exit(-11); // SIGSEGV
+            }
+
+            task->signal_blocked |= (act->sa_mask | (1ULL << sig));
+            task->signal_blocked &= ~((1ULL << 9) | (1ULL << 19)); // SIGKILL/SIGSTOP cannot be blocked
+
+            frame->rcx = (uint64_t)act->sa_handler;
+            frame->user_rsp = new_rsp;
+            frame->rdi = (uint64_t)sig;
+            frame->rsi = (uint64_t)&((struct rt_sigframe *)new_rsp)->info;
+            frame->rdx = (uint64_t)&((struct rt_sigframe *)new_rsp)->uc;
+
+            return;
         }
     }
 }

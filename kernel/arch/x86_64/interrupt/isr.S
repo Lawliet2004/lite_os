@@ -94,11 +94,23 @@ isr_common:
     push rbx
     push rax
 
+    ; Check if we came from userspace (low 2 bits of CS selector on stack)
+    test qword [rsp + 144], 3
+    jz .kernel_entry
+    swapgs
+.kernel_entry:
+
     mov rdi, rsp
     mov r15, rsp
     and rsp, -16
     call exception_dispatch
     mov rsp, r15
+
+    ; Check if we are returning to userspace
+    test qword [rsp + 144], 3
+    jz .kernel_exit
+    swapgs
+.kernel_exit:
 
     pop rax
     pop rbx
@@ -136,11 +148,23 @@ irq_common:
     push rbx
     push rax
 
+    ; Check if we came from userspace
+    test qword [rsp + 144], 3
+    jz .kernel_entry
+    swapgs
+.kernel_entry:
+
     mov rdi, rsp
     mov r15, rsp
     and rsp, -16
     call irq_dispatch
     mov rsp, r15
+
+    ; Check if we are returning to userspace
+    test qword [rsp + 144], 3
+    jz .kernel_exit
+    swapgs
+.kernel_exit:
 
     pop rax
     pop rbx
