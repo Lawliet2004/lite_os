@@ -132,6 +132,7 @@ RAWSYSCALL_TESTS := \
 	$(BUILD_DIR)/tests/raw/test_read.elf \
 	$(BUILD_DIR)/tests/raw/test_stat.elf \
 	$(BUILD_DIR)/tests/raw/test_mmap.elf \
+	$(BUILD_DIR)/tests/raw/test_mmap_file.elf \
 	$(BUILD_DIR)/tests/raw/test_process.elf \
 	$(BUILD_DIR)/tests/raw/test_clock.elf \
 	$(BUILD_DIR)/tests/raw/test_getrandom.elf \
@@ -179,6 +180,7 @@ $(BUILD_DIR)/initramfs.tar: $(BUILD_DIR)/user/init.elf $(BUILD_DIR)/user/sh.elf 
 	cp $(BUILD_DIR)/tests/raw/test_read.elf        $(BUILD_DIR)/initramfs-root/tests/test_read
 	cp $(BUILD_DIR)/tests/raw/test_stat.elf        $(BUILD_DIR)/initramfs-root/tests/test_stat
 	cp $(BUILD_DIR)/tests/raw/test_mmap.elf        $(BUILD_DIR)/initramfs-root/tests/test_mmap
+	cp $(BUILD_DIR)/tests/raw/test_mmap_file.elf   $(BUILD_DIR)/initramfs-root/tests/test_mmap_file
 	cp $(BUILD_DIR)/tests/raw/test_process.elf     $(BUILD_DIR)/initramfs-root/tests/test_process
 	cp $(BUILD_DIR)/tests/raw/test_clock.elf       $(BUILD_DIR)/initramfs-root/tests/test_clock
 	cp $(BUILD_DIR)/tests/raw/test_getrandom.elf   $(BUILD_DIR)/initramfs-root/tests/test_getrandom

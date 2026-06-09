@@ -765,6 +765,31 @@ int main(int argc, char **argv)
     
     printf("Test 19: PASSED\n\n");
 
+    // Test 20: File-backed mmap tests
+    printf("Test 20: Running file-backed mmap tests...\n");
+    int mmap_file_pid = fork();
+    if (mmap_file_pid < 0) {
+        printf("Init ERROR: fork for file-backed mmap test failed\n");
+        exit(1);
+    }
+    if (mmap_file_pid == 0) {
+        char *const mmap_file_argv[] = {"test_mmap_file", NULL};
+        execve("/tests/test_mmap_file", mmap_file_argv, NULL);
+        printf("Init ERROR: execve /tests/test_mmap_file failed\n");
+        exit(1);
+    }
+    int mmap_file_status;
+    wait4(mmap_file_pid, &mmap_file_status, 0, NULL);
+    if (WIFSIGNALED(mmap_file_status)) {
+        printf("Init ERROR: test_mmap_file terminated by signal %d\n", WTERMSIG(mmap_file_status));
+        exit(1);
+    }
+    if (WEXITSTATUS(mmap_file_status) != 0) {
+        printf("Init ERROR: test_mmap_file exited with code %d\n", WEXITSTATUS(mmap_file_status));
+        exit(1);
+    }
+    printf("Test 20: PASSED\n\n");
+
     // Launch UDP Echo Server
     printf("Launching UDP Echo Server on port 9999...\n");
     int udp_pid = fork();

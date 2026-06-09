@@ -253,6 +253,19 @@ process exit is clean.
 Acceptance: `malloc` works in a static musl program, anonymous `mmap` works,
 invalid memory faults, and sparse mappings are lazy.
 
+**Phase 19: File-Backed Mmap (Milestone 2)**
+
+- file-backed `mmap` with MAP_PRIVATE
+- COW page fault loading from file inode
+- offset alignment validation (page-aligned required)
+- bytes beyond EOF are zero-filled
+- MAP_PRIVATE writes do not modify underlying file
+- mmap with invalid fd returns EBADF
+- mmap with misaligned offset returns EINVAL
+
+Acceptance: file-backed mmap tests pass (read, offset, beyond EOF, COW write,
+bad fd, misaligned offset). Serial evidence: `FILE_MMAP: all tests passed`.
+
 ## Phase 19: Linux Application Compatibility Roadmap
 
 - define Linux compatibility levels 0 through 10

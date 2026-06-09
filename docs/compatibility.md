@@ -4,15 +4,45 @@ This matrix documents the verification status of various Linux userspace program
 
 ## Phase 1 Baseline
 
-**Build Environment:**
-- clang (--target=x86_64-elf)
-- ld.lld
-- nasm
-- xorriso
-- qemu-system-x86_64
-- make, python3, gcc
+**Verification:** `make verify-boot` PASS (2026-06-08)
+
+## Phase 2: Real VMA and Page-Fault Infrastructure
 
 **Verification:** `make verify-boot` PASS (2026-06-08)
+
+**Completed Features:**
+- Proper per-process Virtual Memory Area (VMA) allocation replacing the old bump allocator.
+- VMA lookup, overlap detection, splitting, and merging.
+- Lazy demand paging for anonymous `mmap` (pages allocated, zero-filled, and mapped on-demand).
+- Validation-time on-demand page mapping in `vmm_validate_user_ptr_ex` to support syscall copy operations.
+- VMA permission checks during page faults. Userspace memory violations safely trigger SIGSEGV and clean process termination.
+
+**Verification Suite Additions (in `/tests/test_all`):**
+- Lazy page fault allocation validation.
+- Invalid size checks.
+- Accessing unmapped memory after `munmap` (triggers child SIGSEGV verification).
+- Writing to a page protected to read-only via `mprotect` (triggers child SIGSEGV verification).
+- Accessing memory mapped with `PROT_NONE` (triggers child SIGSEGV verification).
+- Overlapping mmap replacement using `MAP_FIXED` (triggers replacement and fresh zero-fill).
+
+**Test Suite Results (all 19 tests PASSED):**
+
+**Verification:** `powershell -ExecutionPolicy Bypass -File scripts\ci-boot.ps1` PASS (2026-06-08)
+
+**Completed Features:**
+- Proper per-process Virtual Memory Area (VMA) allocation replacing the old bump allocator.
+- VMA lookup, overlap detection, splitting, and merging.
+- Lazy demand paging for anonymous `mmap` (pages allocated, zero-filled, and mapped on-demand).
+- Validation-time on-demand page mapping in `vmm_validate_user_ptr_ex` to support syscall copy operations.
+- VMA permission checks during page faults. Userspace memory violations safely trigger SIGSEGV and clean process termination.
+
+**Verification Suite Additions (in `/tests/test_all`):**
+- Lazy page fault allocation validation.
+- Invalid size checks.
+- Accessing unmapped memory after `munmap` (triggers child SIGSEGV verification).
+- Writing to a page protected to read-only via `mprotect` (triggers child SIGSEGV verification).
+- Accessing memory mapped with `PROT_NONE` (triggers child SIGSEGV verification).
+- Overlapping mmap replacement using `MAP_FIXED` (triggers replacement and fresh zero-fill).
 
 **Test Suite Results (all 19 tests PASSED):**
 
@@ -37,6 +67,7 @@ This matrix documents the verification status of various Linux userspace program
 | 17 | socket creation / binding | `Test 17: PASSED` |
 | 18 | static musl hello world | `Hello from musl!` + `Test 18: PASSED` |
 | 19 | Bad executable / pointer rejection | `Test 19: PASSED` |
+| 20 | File-backed mmap read / offset / beyond-EOF / private-write / bad-fd / misaligned-offset | `Test 20: PASSED` |
 
 **No CPU exceptions** outside expected user-space negative tests.
 **No kernel panics.**
@@ -50,7 +81,7 @@ For machine-readable scoreboard, see [compatibility_scoreboard.csv](./compatibil
 | **Raw Syscall Suite** (`test_all`) | Static | None (Direct) | `write`, `exit_group`, `openat`, `read`, `close`, `newfstatat`, `brk`, `mmap`, `munmap`, `getpid`, `gettid`, `uname`, `clock_gettime`, `nanosleep`, `getrandom` | **PASS** | 2026-06-08 | `RAWSYSCALL: all tests passed` |
 | **Static Musl Hello** (`hello_musl`) | Static | musl | `writev`, `exit_group`, `readv` | **PASS** | 2026-06-08 | `Hello from musl!\nargc = 3\nargv[0] = /bin/hello_musl` |
 | **Static BusyBox** | Static | musl | `chmod`, `fchmod`, `chown`, `statx`, `ioctl`, process groups, signals | **Fail (Target)** | 2026-06-08 | N/A (Blocked by Phase 5 syscalls) |
-| **Dynamic Musl Hello** | Dynamic | musl | `mmap` (file-backed), `PT_INTERP` loader, auxiliary vectors | **Fail (Target)** | 2026-06-08 | N/A (Blocked by Phase 4 ELF improvements) |
+| **Dynamic Musl Hello** | Dynamic | musl | `mmap` (file-backed), `PT_INTERP` loader, auxiliary vectors | **Fail (Target)** | 2026-06-09 | File-backed mmap implemented; blocked by PT_INTERP/auxv in Phase 2 |
 | **BusyBox Shell** | Static | musl | `setsid`, `setpgid`, TTY line discipline, signal frame delivery | **Fail (Target)** | 2026-06-08 | N/A (Blocked by Phase 6 terminal / signals) |
 
 ---

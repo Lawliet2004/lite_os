@@ -46,7 +46,13 @@ struct file;
 struct vma {
     uint64_t start;
     uint64_t end;
-    uint32_t flags;
+    uint32_t prot_flags;   /* PROT_READ | PROT_WRITE | PROT_EXEC */
+    uint32_t mmap_flags;   /* MAP_PRIVATE | MAP_SHARED | MAP_ANONYMOUS | MAP_FIXED */
+    bool is_anonymous;
+    bool is_private;
+    struct file *file;     /* NULL if anonymous */
+    uint64_t file_offset;
+    uint32_t flags;        /* Page table flags (e.g. VMM_PRESENT | VMM_USER) */
     bool valid;
 };
 

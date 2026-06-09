@@ -26,8 +26,9 @@ and compatibility tests all agree.
 | **Phase 1: Linux Syscall Foundation** | **Completed** | Syscall table is compatible; negative errno returned; user pointer checks added. |
 | **Phase 2: VFS Maturity** | **Completed** | Initramfs, devfs, procfs, ext2, and fd features verified. |
 | **Phase 3: ELF Loader & Static Programs** | **Completed** | Static musl hello runs with correct argv/envp passing, and execve invalid inputs are rejected safely. |
-| **Phase 4: mmap & Dynamic Prerequisites** | *In Progress* | VMA list per process, file-backed mmap, and page fault handling. |
-| **Phase 5: Dynamic Linker Support** | *Planned* | PT_INTERP loading and dynamic Musl hello world. |
+| **Phase 4: VMA & Page Fault Paging** | **Completed** | Process VMA management, overlap detection, splits/merges, and anonymous lazy demand paging. |
+| **Phase 5: File-backed mmap** | **Completed** | File-backed mmap MAP_PRIVATE with COW page fault loading; offset alignment validated. |
+| **Phase 6: Dynamic Linker Support** | *Planned* | PT_INTERP loading and dynamic Musl hello world. |
 
 ## Immediate Work Queue
 

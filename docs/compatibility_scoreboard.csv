@@ -9,5 +9,6 @@ test_process,Static,None (Direct syscalls),fork;wait4;getpid;exit_group,PASS,202
 test_clock,Static,None (Direct syscalls),clock_gettime;write;exit_group,PASS,2026-06-08,test_clock marker in serial.log
 test_getrandom,Static,None (Direct syscalls),getrandom;write;exit_group,PASS,2026-06-08,test_getrandom marker in serial.log
 dynamic_musl_hello,Dynamic,musl,mmap (file-backed);PT_INTERP;auxiliary vectors,FAIL,2026-06-08,N/A - Blocked by Phase 4 ELF improvements
+test_mmap_file,Static,None (Direct syscalls),openat;read;write;close;mmap;munmap;newfstatat;exit_group,PASS,2026-06-09,FILE_MMAP: all tests passed
 static_busybox,Static,musl,chmod;fchmod;chown;statx;ioctl;process groups;signals,FAIL,2026-06-08,N/A - Blocked by Phase 5 syscalls
 busybox_shell,Static,musl,setsid;setpgid;TTY line discipline;signal frame delivery,FAIL,2026-06-08,N/A - Blocked by Phase 6 terminal/signals

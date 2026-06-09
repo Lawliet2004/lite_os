@@ -16,6 +16,7 @@
 #include <arch/x86_64/vmm.h>
 #include <mm/pmm.h>
 #include <mm/uaccess.h>
+#include <fs/vfs.h>
 #include <stdint.h>
 
 /* mmap flags (Linux ABI) */
@@ -134,7 +135,116 @@ int64_t sys_brk(struct syscall_frame *frame)
 #define MMAP_BASE 0x00007f0000000000ULL  /* 127 TB user space */
 #define MMAP_TOP  0x00007fff00000000ULL
 
-static uint64_t mmap_hint = MMAP_BASE;  /* simple bump allocator for addresses */
+static uint64_t mmap_hint = MMAP_BASE;  /* mmap hint for finding free virtual regions */
+
+/* ------------------------------------------------------------------ */
+/* VMA Helper functions                                               */
+/* ------------------------------------------------------------------ */
+
+struct vma *vma_find(struct process *proc, uint64_t addr)
+{
+    for (int i = 0; i < VMA_MAX; i++) {
+        if (proc->vmas[i].valid && addr >= proc->vmas[i].start && addr < proc->vmas[i].end) {
+            return &proc->vmas[i];
+        }
+    }
+    return 0;
+}
+
+bool vma_overlaps(struct process *proc, uint64_t start, uint64_t end)
+{
+    for (int i = 0; i < VMA_MAX; i++) {
+        if (proc->vmas[i].valid) {
+            if (start < proc->vmas[i].end && end > proc->vmas[i].start) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+void vma_merge_adjacent(struct process *proc)
+{
+    bool merged;
+    do {
+        merged = false;
+        for (int i = 0; i < VMA_MAX; i++) {
+            if (!proc->vmas[i].valid) continue;
+            for (int j = 0; j < VMA_MAX; j++) {
+                if (i == j || !proc->vmas[j].valid) continue;
+
+                if (proc->vmas[i].end == proc->vmas[j].start) {
+                    if (proc->vmas[i].prot_flags == proc->vmas[j].prot_flags &&
+                        proc->vmas[i].mmap_flags == proc->vmas[j].mmap_flags &&
+                        proc->vmas[i].is_anonymous == proc->vmas[j].is_anonymous &&
+                        proc->vmas[i].is_private == proc->vmas[j].is_private &&
+                        proc->vmas[i].file == proc->vmas[j].file &&
+                        proc->vmas[i].flags == proc->vmas[j].flags) {
+                        
+                        if (proc->vmas[i].is_anonymous ||
+                            (proc->vmas[i].file_offset + (proc->vmas[i].end - proc->vmas[i].start) == proc->vmas[j].file_offset)) {
+                            
+                            proc->vmas[i].end = proc->vmas[j].end;
+                            if (!proc->vmas[j].is_anonymous && proc->vmas[j].file != 0) {
+                                file_close(proc->vmas[j].file);
+                            }
+                            proc->vmas[j].valid = false;
+                            merged = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            if (merged) break;
+        }
+    } while (merged);
+}
+
+uint64_t vma_find_free_region(struct process *proc, uint64_t hint, uint64_t length)
+{
+    uint64_t aligned_len = page_align_up(length);
+    uint64_t addr = (hint != 0) ? page_align_down(hint) : mmap_hint;
+
+    if (addr < MMAP_BASE || addr + aligned_len > MMAP_TOP) {
+        addr = MMAP_BASE;
+    }
+
+    uint64_t start_addr = addr;
+    bool wrapped = false;
+    while (1) {
+        if (addr + aligned_len > MMAP_TOP) {
+            if (wrapped) {
+                return 0;
+            }
+            addr = MMAP_BASE;
+            wrapped = true;
+            continue;
+        }
+
+        bool overlap = false;
+        for (int i = 0; i < VMA_MAX; i++) {
+            if (proc->vmas[i].valid) {
+                if (addr < proc->vmas[i].end && addr + aligned_len > proc->vmas[i].start) {
+                    addr = page_align_up(proc->vmas[i].end);
+                    overlap = true;
+                    break;
+                }
+            }
+        }
+
+        if (!overlap) {
+            mmap_hint = page_align_up(addr + aligned_len + VMM_PAGE_SIZE);
+            if (mmap_hint >= MMAP_TOP) {
+                mmap_hint = MMAP_BASE;
+            }
+            return addr;
+        }
+
+        if (wrapped && addr >= start_addr) {
+            return 0;
+        }
+    }
+}
 
 int64_t sys_munmap(struct syscall_frame *frame);
 
@@ -145,36 +255,134 @@ int64_t sys_mmap(struct syscall_frame *frame)
     int      prot   = (int)frame->rdx;
     int      flags  = (int)frame->r10;
     int      fd     = (int)frame->r8;
-    /* offset (frame->r9) ignored for anonymous mappings */
+    uint64_t offset = (uint64_t)frame->r9;
 
     if (current_task == 0 || current_task->process == 0)
         return -(int64_t)EPERM;
 
-    /* Only support anonymous private mappings */
-    if (!(flags & MAP_ANONYMOUS)) {
-        /* File-backed mmap — Phase 23 */
-        (void)fd;
+    struct process *proc = current_task->process;
+
+    /* Reject MAP_SHARED for now (not yet implemented) */
+    if (flags & MAP_SHARED) {
         return -(int64_t)ENOSYS;
     }
 
+    /* Handle file-backed mappings */
+    if (!(flags & MAP_ANONYMOUS)) {
+        /* Validate fd */
+        if (fd < 0 || fd >= MAX_FILES_PER_PROCESS || proc->files[fd] == 0) {
+            return -(int64_t)EBADF;
+        }
+
+        struct file *f = proc->files[fd];
+        if (f->node == 0) {
+            return -(int64_t)EBADF;
+        }
+
+        /* Must be a regular file */
+        if (f->node->type != VFS_TYPE_FILE) {
+            return -(int64_t)ENODEV;
+        }
+
+        /* Offset must be page-aligned */
+        if (offset & 0xfff) {
+            return -(int64_t)EINVAL;
+        }
+
+        /* length must be > 0 */
+        if (length == 0) {
+            return -(int64_t)EINVAL;
+        }
+
+        /* Check for overflow */
+        uint64_t aligned_len = page_align_up(length);
+        if (addr + aligned_len < addr) {
+            return -(int64_t)EINVAL;
+        }
+
+        uint64_t map_addr;
+
+        if (flags & MAP_FIXED) {
+            if (addr & 0xfff) return -(int64_t)EINVAL;
+            if (addr < VMM_USER_BASE || addr + aligned_len > VMM_USER_TOP) {
+                return -(int64_t)EINVAL;
+            }
+            map_addr = addr;
+
+            /* munmap any existing mappings in that range first */
+            struct syscall_frame dummy_frame;
+            dummy_frame.rdi = map_addr;
+            dummy_frame.rsi = aligned_len;
+            sys_munmap(&dummy_frame);
+        } else {
+            map_addr = vma_find_free_region(proc, addr, aligned_len);
+            if (map_addr == 0) {
+                return -(int64_t)ENOMEM;
+            }
+        }
+
+        /* Compute page flags from prot */
+        uint64_t vflags = VMM_PRESENT | VMM_USER;
+        if (prot & PROT_WRITE) vflags |= VMM_WRITABLE;
+        if (!(prot & PROT_EXEC)) vflags |= VMM_NO_EXECUTE;
+
+        /* For MAP_PRIVATE with PROT_WRITE, we map read-only initially (COW) */
+        if ((flags & MAP_PRIVATE) && (prot & PROT_WRITE)) {
+            vflags &= ~VMM_WRITABLE;
+        }
+
+        /* Allocate a VMA slot */
+        int free_slot = -1;
+        for (int i = 0; i < VMA_MAX; i++) {
+            if (!proc->vmas[i].valid) {
+                free_slot = i;
+                break;
+            }
+        }
+
+        if (free_slot == -1) {
+            return -(int64_t)ENOMEM;
+        }
+
+        proc->vmas[free_slot].start = map_addr;
+        proc->vmas[free_slot].end = map_addr + aligned_len;
+        proc->vmas[free_slot].prot_flags = prot;
+        proc->vmas[free_slot].mmap_flags = flags;
+        proc->vmas[free_slot].is_anonymous = false;
+        proc->vmas[free_slot].is_private = true;
+        proc->vmas[free_slot].file = f;
+        f->ref_count++;  /* VMA holds a reference */
+        proc->vmas[free_slot].file_offset = offset;
+        proc->vmas[free_slot].flags = vflags;
+        proc->vmas[free_slot].valid = true;
+
+        vma_merge_adjacent(proc);
+
+        return (int64_t)map_addr;
+    }
+
+    /* Anonymous-only path continues */
+
     if (length == 0) return -(int64_t)EINVAL;
+    uint64_t aligned_len = page_align_up(length);
+    if (addr + aligned_len < addr) return -(int64_t)EINVAL;
 
+    /* proc already declared above */
     uint64_t map_addr;
-    struct process *proc = current_task->process;
 
-    if ((flags & MAP_FIXED) && addr != 0) {
-        map_addr = page_align_down(addr);
+    if (flags & MAP_FIXED) {
+        if (addr & 0xfff) return -(int64_t)EINVAL;
+        if (addr < VMM_USER_BASE || addr + aligned_len > VMM_USER_TOP) return -(int64_t)EINVAL;
+        map_addr = addr;
+
         /* munmap any existing mappings in that range first */
         struct syscall_frame dummy_frame;
         dummy_frame.rdi = map_addr;
-        dummy_frame.rsi = length;
+        dummy_frame.rsi = aligned_len;
         sys_munmap(&dummy_frame);
     } else {
-        /* Bump-allocate from mmap_hint */
-        map_addr = mmap_hint;
-        mmap_hint += page_align_up(length) + VMM_PAGE_SIZE; /* gap page */
-        if (mmap_hint >= MMAP_TOP) {
-            mmap_hint = MMAP_BASE;
+        map_addr = vma_find_free_region(proc, addr, aligned_len);
+        if (map_addr == 0) {
             return -(int64_t)ENOMEM;
         }
     }
@@ -198,9 +406,17 @@ int64_t sys_mmap(struct syscall_frame *frame)
     }
 
     proc->vmas[free_slot].start = map_addr;
-    proc->vmas[free_slot].end = map_addr + page_align_up(length);
+    proc->vmas[free_slot].end = map_addr + aligned_len;
+    proc->vmas[free_slot].prot_flags = prot;
+    proc->vmas[free_slot].mmap_flags = flags;
+    proc->vmas[free_slot].is_anonymous = true;
+    proc->vmas[free_slot].is_private = (flags & MAP_PRIVATE) ? true : false;
+    proc->vmas[free_slot].file = 0;
+    proc->vmas[free_slot].file_offset = 0;
     proc->vmas[free_slot].flags = vflags;
     proc->vmas[free_slot].valid = true;
+
+    vma_merge_adjacent(proc);
 
     return (int64_t)map_addr;
 }
@@ -220,9 +436,36 @@ int64_t sys_munmap(struct syscall_frame *frame)
     if (addr & 0xfff) return -(int64_t)EINVAL; /* must be page-aligned */
 
     struct process *proc = current_task->process;
-    uint64_t pages = page_align_up(length) / VMM_PAGE_SIZE;
+    uint64_t aligned_len = page_align_up(length);
+    if (addr + aligned_len < addr) return -(int64_t)EINVAL;
 
-    /* Unmap physical pages first */
+    uint64_t start = addr;
+    uint64_t end = addr + aligned_len;
+
+    /* Pre-check if split slot is needed and available */
+    bool need_split_slot = false;
+    for (int i = 0; i < VMA_MAX; i++) {
+        struct vma *vma = &proc->vmas[i];
+        if (vma->valid && vma->start < start && vma->end > end) {
+            need_split_slot = true;
+            break;
+        }
+    }
+    if (need_split_slot) {
+        int free_slot = -1;
+        for (int j = 0; j < VMA_MAX; j++) {
+            if (!proc->vmas[j].valid) {
+                free_slot = j;
+                break;
+            }
+        }
+        if (free_slot == -1) {
+            return -(int64_t)ENOMEM;
+        }
+    }
+
+    /* Unmap physical pages first (only if they are mapped) */
+    uint64_t pages = aligned_len / VMM_PAGE_SIZE;
     for (uint64_t i = 0; i < pages; i++) {
         uint64_t vaddr = addr + i * VMM_PAGE_SIZE;
         phys_addr_t phys;
@@ -233,13 +476,14 @@ int64_t sys_munmap(struct syscall_frame *frame)
     }
 
     /* Update VMAs */
-    uint64_t start = addr;
-    uint64_t end = addr + page_align_up(length);
     for (int i = 0; i < VMA_MAX; i++) {
         struct vma *vma = &proc->vmas[i];
         if (!vma->valid) continue;
 
         if (vma->start >= start && vma->end <= end) {
+            if (!vma->is_anonymous && vma->file != 0) {
+                file_close(vma->file);
+            }
             vma->valid = false;
         }
         else if (vma->start < start && vma->end > end) {
@@ -247,10 +491,13 @@ int64_t sys_munmap(struct syscall_frame *frame)
             vma->end = start;
             for (int j = 0; j < VMA_MAX; j++) {
                 if (!proc->vmas[j].valid) {
-                    proc->vmas[j].start = end;
-                    proc->vmas[j].end = old_end;
-                    proc->vmas[j].flags = vma->flags;
-                    proc->vmas[j].valid = true;
+                    struct vma new_vma = *vma;
+                    new_vma.start = end;
+                    new_vma.end = old_end;
+                    if (!vma->is_anonymous) {
+                        new_vma.file_offset = vma->file_offset + (end - vma->start);
+                    }
+                    proc->vmas[j] = new_vma;
                     break;
                 }
             }
@@ -259,10 +506,15 @@ int64_t sys_munmap(struct syscall_frame *frame)
             vma->end = start;
         }
         else if (vma->start >= start && vma->start < end && vma->end > end) {
+            uint64_t old_start = vma->start;
             vma->start = end;
+            if (!vma->is_anonymous) {
+                vma->file_offset += (end - old_start);
+            }
         }
     }
 
+    vma_merge_adjacent(proc);
     return 0;
 }
 
@@ -282,11 +534,43 @@ int64_t sys_mprotect(struct syscall_frame *frame)
     if (length == 0) return 0;
 
     struct process *proc = current_task->process;
+    uint64_t aligned_len = page_align_up(length);
+    if (addr + aligned_len < addr) return -(int64_t)EINVAL;
+
+    uint64_t start = addr;
+    uint64_t end = addr + aligned_len;
+
+    /* Pre-check slots needed and availability */
+    int slots_needed = 0;
+    for (int i = 0; i < VMA_MAX; i++) {
+        struct vma *vma = &proc->vmas[i];
+        if (!vma->valid) continue;
+
+        if (vma->start < start && vma->end > end) {
+            slots_needed += 2;
+        } else if (vma->start < start && vma->end > start && vma->end <= end) {
+            slots_needed += 1;
+        } else if (vma->start >= start && vma->start < end && vma->end > end) {
+            slots_needed += 1;
+        }
+    }
+
+    int slots_available = 0;
+    for (int j = 0; j < VMA_MAX; j++) {
+        if (!proc->vmas[j].valid) {
+            slots_available++;
+        }
+    }
+    if (slots_available < slots_needed) {
+        return -(int64_t)ENOMEM;
+    }
+
     uint64_t vflags = VMM_PRESENT | VMM_USER;
     if (prot & PROT_WRITE) vflags |= VMM_WRITABLE;
     if (!(prot & PROT_EXEC)) vflags |= VMM_NO_EXECUTE;
 
-    uint64_t pages = page_align_up(length) / VMM_PAGE_SIZE;
+    /* Walk page table and update protection flags for mapped pages */
+    uint64_t pages = aligned_len / VMM_PAGE_SIZE;
     for (uint64_t i = 0; i < pages; i++) {
         uint64_t vaddr = addr + i * VMM_PAGE_SIZE;
         phys_addr_t phys;
@@ -296,68 +580,96 @@ int64_t sys_mprotect(struct syscall_frame *frame)
     }
 
     /* Update VMAs */
-    uint64_t start = addr;
-    uint64_t end = addr + page_align_up(length);
     for (int i = 0; i < VMA_MAX; i++) {
         struct vma *vma = &proc->vmas[i];
         if (!vma->valid) continue;
 
         if (vma->start >= start && vma->end <= end) {
+            vma->prot_flags = prot;
             vma->flags = vflags;
         }
         else if (vma->start < start && vma->end > end) {
             uint64_t old_end = vma->end;
-            uint32_t old_flags = vma->flags;
-            vma->end = start;
-            int mid_idx = -1;
+            int slot1 = -1, slot2 = -1;
             for (int j = 0; j < VMA_MAX; j++) {
                 if (!proc->vmas[j].valid) {
-                    proc->vmas[mid_idx = j].start = start;
-                    proc->vmas[j].end = end;
-                    proc->vmas[j].flags = vflags;
-                    proc->vmas[j].valid = true;
-                    break;
+                    if (slot1 == -1) slot1 = j;
+                    else { slot2 = j; break; }
                 }
             }
-            if (mid_idx != -1) {
-                for (int j = 0; j < VMA_MAX; j++) {
-                    if (!proc->vmas[j].valid) {
-                        proc->vmas[j].start = end;
-                        proc->vmas[j].end = old_end;
-                        proc->vmas[j].flags = old_flags;
-                        proc->vmas[j].valid = true;
-                        break;
-                    }
+            if (slot1 != -1 && slot2 != -1) {
+                vma->end = start;
+
+                struct vma mid_vma = *vma;
+                mid_vma.start = start;
+                mid_vma.end = end;
+                mid_vma.prot_flags = prot;
+                mid_vma.flags = vflags;
+                if (!vma->is_anonymous) {
+                    mid_vma.file_offset = vma->file_offset + (start - vma->start);
                 }
+                proc->vmas[slot1] = mid_vma;
+
+                struct vma right_vma = *vma;
+                right_vma.start = end;
+                right_vma.end = old_end;
+                if (!vma->is_anonymous) {
+                    right_vma.file_offset = vma->file_offset + (end - vma->start);
+                }
+                proc->vmas[slot2] = right_vma;
             }
         }
         else if (vma->start < start && vma->end > start && vma->end <= end) {
-            uint64_t old_end = vma->end;
-            vma->end = start;
+            int slot = -1;
             for (int j = 0; j < VMA_MAX; j++) {
                 if (!proc->vmas[j].valid) {
-                    proc->vmas[j].start = start;
-                    proc->vmas[j].end = old_end;
-                    proc->vmas[j].flags = vflags;
-                    proc->vmas[j].valid = true;
+                    slot = j;
                     break;
                 }
             }
+            if (slot != -1) {
+                uint64_t old_end = vma->end;
+                vma->end = start;
+
+                struct vma new_vma = *vma;
+                new_vma.start = start;
+                new_vma.end = old_end;
+                new_vma.prot_flags = prot;
+                new_vma.flags = vflags;
+                if (!vma->is_anonymous) {
+                    new_vma.file_offset = vma->file_offset + (start - vma->start);
+                }
+                proc->vmas[slot] = new_vma;
+            }
         }
         else if (vma->start >= start && vma->start < end && vma->end > end) {
-            uint64_t old_start = vma->start;
-            vma->start = end;
+            int slot = -1;
             for (int j = 0; j < VMA_MAX; j++) {
                 if (!proc->vmas[j].valid) {
-                    proc->vmas[j].start = old_start;
-                    proc->vmas[j].end = end;
-                    proc->vmas[j].flags = vflags;
-                    proc->vmas[j].valid = true;
+                    slot = j;
                     break;
                 }
+            }
+            if (slot != -1) {
+                uint64_t old_start = vma->start;
+                vma->start = end;
+                if (!vma->is_anonymous) {
+                    vma->file_offset += (end - old_start);
+                }
+
+                struct vma new_vma = *vma;
+                new_vma.start = old_start;
+                new_vma.end = end;
+                new_vma.prot_flags = prot;
+                new_vma.flags = vflags;
+                if (!vma->is_anonymous) {
+                    new_vma.file_offset = vma->file_offset - (end - old_start);
+                }
+                proc->vmas[slot] = new_vma;
             }
         }
     }
 
+    vma_merge_adjacent(proc);
     return 0;
 }

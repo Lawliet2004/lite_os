@@ -77,9 +77,10 @@ static inline int64_t _sc6(int64_t nr,
 #define SYS_read          0
 #define SYS_write         1
 #define SYS_close         3
+#define SYS_mprotect      10
+#define SYS_munmap        11
 #define SYS_brk           12
 #define SYS_mmap          9
-#define SYS_munmap        11
 #define SYS_getpid        39
 #define SYS_gettid        186
 #define SYS_uname         63
@@ -89,12 +90,16 @@ static inline int64_t _sc6(int64_t nr,
 #define SYS_newfstatat    262
 #define SYS_openat        257
 #define SYS_exit_group    231
+#define SYS_fork          57
+#define SYS_wait4         61
 
 /* Flags / constants */
 #define AT_FDCWD      (-100)
 #define O_RDONLY      0
 #define MAP_PRIVATE   0x02
 #define MAP_ANONYMOUS 0x20
+#define MAP_FIXED     0x10
+#define PROT_NONE     0
 #define PROT_READ     1
 #define PROT_WRITE    2
 #define CLOCK_REALTIME   0
@@ -287,10 +292,12 @@ static void test_brk(void)
 }
 
 /* ---- 5. mmap + munmap ---- */
+#define SYS_mprotect      10
 static void test_mmap(void)
 {
     test_begin("mmap+munmap");
 
+    /* 1. Basic anonymous private mmap (verifies lazy page allocation) */
     int64_t maddr = _sc6(SYS_mmap, 0, 65536,
                           PROT_READ | PROT_WRITE,
                           MAP_PRIVATE | MAP_ANONYMOUS,
@@ -298,6 +305,7 @@ static void test_mmap(void)
     check(maddr > 0, "mmap anon failed");
     if (maddr <= 0) return;
 
+    /* Write to pages, triggering demand paging */
     volatile uint32_t *p1 = (volatile uint32_t *)(size_t)maddr;
     volatile uint32_t *p2 = (volatile uint32_t *)(size_t)(maddr + 65532);
     *p1 = 0xcafebabe;
@@ -305,11 +313,110 @@ static void test_mmap(void)
     check(*p1 == 0xcafebabe, "mmap write p1 failed");
     check(*p2 == 0x12345678, "mmap write p2 failed");
 
-    int64_t r = _sc2(SYS_munmap, maddr, 65536);
+    /* 2. mmap with length=0 must return -EINVAL */
+    int64_t r = _sc6(SYS_mmap, 0, 0, PROT_READ, MAP_PRIVATE|MAP_ANONYMOUS, -1LL, 0);
+    check(r == -(int64_t)EINVAL, "mmap(len=0) != -EINVAL");
+
+    /* 3. munmap the region */
+    r = _sc2(SYS_munmap, maddr, 65536);
     check(r == 0, "munmap failed");
 
-    r = _sc6(SYS_mmap, 0, 0, PROT_READ, MAP_PRIVATE|MAP_ANONYMOUS, -1LL, 0);
-    check(r == -(int64_t)EINVAL, "mmap(len=0) != -EINVAL");
+    /* 4. Verify munmap then access kills child with SIGSEGV */
+    int64_t child_pid = _sc0(SYS_fork);
+    check(child_pid >= 0, "fork for munmap access test failed");
+    if (child_pid == 0) {
+        /* Child: access unmapped memory */
+        volatile uint32_t *bad_ptr = (volatile uint32_t *)(size_t)maddr;
+        uint32_t val = *bad_ptr;
+        (void)val;
+        _sc1(SYS_exit_group, 42); /* should not reach here */
+    } else {
+        int status = 0;
+        int64_t wait_ret = _sc4(SYS_wait4, child_pid, (int64_t)(size_t)&status, 0, 0);
+        check(wait_ret == child_pid, "wait4 munmap access test failed");
+        check(status == 11, "munmap then access did not crash child with SIGSEGV");
+    }
+
+    /* 5. Verify mprotect read-only then write fault kills child with SIGSEGV */
+    maddr = _sc6(SYS_mmap, 0, 4096,
+                  PROT_READ | PROT_WRITE,
+                  MAP_PRIVATE | MAP_ANONYMOUS,
+                  -1LL, 0);
+    check(maddr > 0, "mmap for mprotect test failed");
+    
+    r = _sc3(SYS_mprotect, maddr, 4096, PROT_READ);
+    check(r == 0, "mprotect to PROT_READ failed");
+
+    child_pid = _sc0(SYS_fork);
+    check(child_pid >= 0, "fork for mprotect test failed");
+    if (child_pid == 0) {
+        /* Child: write to read-only memory */
+        volatile uint32_t *p_ro = (volatile uint32_t *)(size_t)maddr;
+        *p_ro = 0xabcdef;
+        _sc1(SYS_exit_group, 42); /* should not reach here */
+    } else {
+        int status = 0;
+        int64_t wait_ret = _sc4(SYS_wait4, child_pid, (int64_t)(size_t)&status, 0, 0);
+        check(wait_ret == child_pid, "wait4 mprotect test failed");
+        check(status == 11, "write to read-only did not crash child with SIGSEGV");
+    }
+
+    /* 6. Verify PROT_NONE fault kills child with SIGSEGV */
+    r = _sc3(SYS_mprotect, maddr, 4096, PROT_NONE);
+    check(r == 0, "mprotect to PROT_NONE failed");
+
+    child_pid = _sc0(SYS_fork);
+    check(child_pid >= 0, "fork for PROT_NONE test failed");
+    if (child_pid == 0) {
+        /* Child: read from PROT_NONE memory */
+        volatile uint32_t *p_none = (volatile uint32_t *)(size_t)maddr;
+        uint32_t val = *p_none;
+        (void)val;
+        _sc1(SYS_exit_group, 42); /* should not reach here */
+    } else {
+        int status = 0;
+        int64_t wait_ret = _sc4(SYS_wait4, child_pid, (int64_t)(size_t)&status, 0, 0);
+        check(wait_ret == child_pid, "wait4 PROT_NONE test failed");
+        check(status == 11, "read from PROT_NONE did not crash child with SIGSEGV");
+    }
+
+    /* Clean up mprotect region */
+    r = _sc2(SYS_munmap, maddr, 4096);
+    check(r == 0, "munmap after mprotect test failed");
+
+    /* 7. Overlapping mmap with MAP_FIXED replacement */
+    /* Map a 2-page region */
+    int64_t r1 = _sc6(SYS_mmap, 0, 8192,
+                      PROT_READ | PROT_WRITE,
+                      MAP_PRIVATE | MAP_ANONYMOUS,
+                      -1LL, 0);
+    check(r1 > 0, "mmap region 1 failed");
+
+    volatile uint32_t *r1_p1 = (volatile uint32_t *)(size_t)r1;
+    volatile uint32_t *r1_p2 = (volatile uint32_t *)(size_t)(r1 + 4096);
+    *r1_p1 = 0x11111111;
+    *r1_p2 = 0x22222222;
+
+    /* Map a new page with MAP_FIXED at region 1's second page address */
+    int64_t r2 = _sc6(SYS_mmap, r1 + 4096, 4096,
+                      PROT_READ | PROT_WRITE,
+                      MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED,
+                      -1LL, 0);
+    check(r2 == r1 + 4096, "mmap MAP_FIXED failed or placed at wrong address");
+
+    /* Verify first page is still intact */
+    check(*r1_p1 == 0x11111111, "MAP_FIXED corrupted adjacent page");
+
+    /* Verify second page is zero-filled (as a fresh lazy mapping) */
+    check(*r1_p2 == 0, "MAP_FIXED did not zero/replace page content");
+
+    /* Write to the new page and verify */
+    *r1_p2 = 0x33333333;
+    check(*r1_p2 == 0x33333333, "write to MAP_FIXED page failed");
+
+    /* Clean up overlapping mappings */
+    r = _sc2(SYS_munmap, r1, 8192);
+    check(r == 0, "munmap overlapping failed");
 }
 
 /* ---- 6. getpid + gettid ---- */

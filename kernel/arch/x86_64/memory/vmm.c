@@ -1,4 +1,5 @@
 #include <arch/x86_64/vmm.h>
+#include <sched/task.h>
 #include <arch/x86_64/cpu.h>
 #include <kernel/panic.h>
 #include <kernel/printk.h>
@@ -349,6 +350,10 @@ bool vmm_is_kernel_address(virt_addr_t virt)
     return virt >= VMM_KERNEL_BASE;
 }
 
+#define PROT_READ  1
+#define PROT_WRITE 2
+#define PROT_EXEC  4
+
 bool vmm_validate_user_ptr_ex(struct address_space *space, const void *ptr, size_t length, bool require_write)
 {
     if (space == 0) return false;
@@ -362,12 +367,72 @@ bool vmm_validate_user_ptr_ex(struct address_space *space, const void *ptr, size
     if (start < VMM_USER_BASE || last > VMM_USER_TOP) return false;
     if (!vmm_is_user_address(start) || !vmm_is_user_address(last)) return false;
 
+    /* We need sched/task.h definitions to lookup VMAs of the current process */
+    extern struct task *current_task;
+
     virt_addr_t page = start & ~PAGE_OFFSET_MASK;
     for (;;) {
         uint64_t *pte = walk_to_pte(space, page, 0, false);
-        if (pte == 0 || (*pte & VMM_PRESENT) == 0) return false;
+        bool present = (pte != 0 && (*pte & VMM_PRESENT) != 0);
+
+        if (!present) {
+            /* If the page is not present, check if a VMA of the current task covers it */
+            if (current_task != 0 && current_task->process != 0 && current_task->process->address_space == space) {
+                struct process *proc = current_task->process;
+                struct vma *vma = 0;
+                for (int i = 0; i < VMA_MAX; i++) {
+                    if (proc->vmas[i].valid && page >= proc->vmas[i].start && page < proc->vmas[i].end) {
+                        vma = &proc->vmas[i];
+                        break;
+                    }
+                }
+
+                if (vma != 0) {
+                    /* Check permissions */
+                    if (require_write && !(vma->prot_flags & PROT_WRITE)) {
+                        return false;
+                    }
+                    if (!require_write && !(vma->prot_flags & PROT_READ)) {
+                        return false;
+                    }
+
+                    /* Allocate and map lazy page */
+                    phys_addr_t phys = pmm_alloc_page();
+                    if (phys == 0) return false;
+                    memset(phys_to_virt(phys), 0, VMM_PAGE_SIZE);
+
+                    if (vmm_map(space, page, phys, vma->flags) != 0) {
+                        pmm_free_page(phys);
+                        return false;
+                    }
+                    pte = walk_to_pte(space, page, 0, false);
+                    present = (pte != 0 && (*pte & VMM_PRESENT) != 0);
+                }
+            }
+        }
+
+        if (!present) return false;
         if ((*pte & VMM_USER) == 0) return false;
-        if (require_write && (*pte & VMM_WRITABLE) == 0) return false;
+
+        if (require_write && (*pte & VMM_WRITABLE) == 0) {
+            /* If write is required but not set in PTE, check if VMA allows writing and update PTE flags */
+            if (current_task != 0 && current_task->process != 0 && current_task->process->address_space == space) {
+                struct process *proc = current_task->process;
+                struct vma *vma = 0;
+                for (int i = 0; i < VMA_MAX; i++) {
+                    if (proc->vmas[i].valid && page >= proc->vmas[i].start && page < proc->vmas[i].end) {
+                        vma = &proc->vmas[i];
+                        break;
+                    }
+                }
+                if (vma != 0 && (vma->prot_flags & PROT_WRITE)) {
+                    if (vmm_protect(space, page, vma->flags) == 0) {
+                        pte = walk_to_pte(space, page, 0, false);
+                    }
+                }
+            }
+            if ((*pte & VMM_WRITABLE) == 0) return false;
+        }
 
         if (page >= (last & ~PAGE_OFFSET_MASK)) break;
         page += VMM_PAGE_SIZE;

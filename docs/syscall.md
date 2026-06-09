@@ -110,7 +110,7 @@ All syscall handlers return `int64_t`:
 | Syscall      | Nr  | Status    | Notes |
 |--------------|-----|-----------|-------|
 | `brk`        | 12  | ✅ Full   | grows/shrinks process heap; 256 MiB cap |
-| `mmap`       | 9   | ✅ Partial| MAP_ANONYMOUS + MAP_PRIVATE only; file-backed = -ENOSYS |
+| `mmap`       | 9   | ✅ Full   | MAP_ANONYMOUS + MAP_PRIVATE with VMA demand paging; file-backed MAP_PRIVATE with COW page fault loading |
 | `munmap`     | 11  | ✅ Full   | unmaps + frees PMM pages, updates VMAs |
 | `mprotect`   | 10  | ✅ Full   | updates page flags and VMA records |
 
@@ -160,7 +160,7 @@ Phase 2: raw-syscall tests PASSED
 
 | Feature | Status | Details |
 |---------|--------|---------|
-| File-backed mmap | ❌ ENOSYS | Returns `-ENOSYS`; needed for musl/BusyBox (Milestone 7) |
+| File-backed mmap | ✅ Full   | MAP_PRIVATE with COW page fault loading; offset alignment validated |
 | symlinks | ❌ None | `readlink` returns `-ENOSYS` for non-symlinks |
 | uid/gid | Stub | Always returns 0 (root) |
 | signal delivery to user stack | ❌ None | `rt_sigaction` stores handlers but does not deliver to user stack |

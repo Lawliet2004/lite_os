@@ -473,6 +473,13 @@ static int reap_zombie(struct task *zombie, int *exit_code)
                 child->files[i] = 0;
             }
         }
+        // Release file references held by VMAs
+        for (int i = 0; i < VMA_MAX; i++) {
+            if (child->vmas[i].valid && !child->vmas[i].is_anonymous && child->vmas[i].file != 0) {
+                file_close(child->vmas[i].file);
+                child->vmas[i].file = 0;
+            }
+        }
         if (child->owns_address_space && child->address_space != 0) {
             vmm_destroy_address_space(child->address_space);
             child->address_space = 0;
