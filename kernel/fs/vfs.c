@@ -525,6 +525,10 @@ void vfs_init(void)
     // Phase 23: Create /tmp directory (acting as tmpfs)
     vfs_create_file("/tmp", VFS_TYPE_DIR, 0, 0);
 
+    // Initialize ATA PIO driver
+    extern void ata_init(void);
+    ata_init();
+
     // Initialize ext2 filesystem
     ext2_init();
 }

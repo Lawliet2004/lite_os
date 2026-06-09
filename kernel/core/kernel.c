@@ -299,7 +299,7 @@ void kernel_main(void)
     printk("Sched: idle task registered (priority=%d)\n", SCHED_PRIO_MAX);
     printk("Sched: timer preemption started\n");
 
-    // Scan PCI and initialize networking
+    // Scan PCI and initialize networking/storage
     extern void pci_init(void);
     extern bool virtio_net_init(void);
     pci_init();

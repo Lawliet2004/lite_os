@@ -635,8 +635,12 @@ int main(int argc, char **argv)
     printf("Init: Mounted EXT2 hello.txt content: '%s'\n", ext2_buf);
     close(ext2_fd);
 
-    if (strcmp(ext2_buf, "Hello from EXT2 disk!\n") != 0) {
-        printf("Init ERROR: EXT2 hello.txt content mismatch\n");
+    if (strcmp(ext2_buf, "Hello from EXT2 disk!\n") == 0) {
+        printf("  - First boot or non-persistent mode detected. Overwriting...\n");
+    } else if (strcmp(ext2_buf, "EXT2 write success!") == 0) {
+        printf("  - Subsequent boot: persistent storage read verified successfully!\n");
+    } else {
+        printf("Init ERROR: EXT2 hello.txt content mismatch (got '%s')\n", ext2_buf);
         exit(1);
     }
 

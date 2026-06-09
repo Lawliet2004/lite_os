@@ -105,6 +105,7 @@ C_SOURCES := \
 	kernel/fs/block.c \
 	kernel/drivers/pci.c \
 	kernel/drivers/virtio_net.c \
+	kernel/drivers/ata_pio.c \
 	kernel/net/net.c \
 	kernel/net/eth.c \
 	kernel/net/arp.c \
@@ -253,18 +254,22 @@ $(ISO): $(KERNEL) boot/limine.conf
 
 run: $(ISO)
 	@mkdir -p $(BUILD_DIR)
-	qemu-system-x86_64 -M q35 -m 64M -cdrom $(ISO) \
+	python3 -c "import os; os.makedirs('build', exist_ok=True); f='build/disk.img'; open(f, 'wb').write(b'\x00'*65536) if not os.path.exists(f) or os.path.getsize(f) < 65536 else None" || python -c "import os; os.makedirs('build', exist_ok=True); f='build/disk.img'; open(f, 'wb').write(b'\x00'*65536) if not os.path.exists(f) or os.path.getsize(f) < 65536 else None"
+	qemu-system-x86_64 -M pc -m 64M -cdrom $(ISO) \
 		-serial file:$(SERIAL_LOG) -debugcon stdio -no-reboot -no-shutdown \
-		-netdev user,id=n0 -device virtio-net-pci,netdev=n0
+		-netdev user,id=n0 -device virtio-net-pci,netdev=n0 \
+		-drive file=build/disk.img,format=raw,media=disk
 
 # Helper: boot the kernel once with a 25s timeout and capture the serial log.
 # Returns 0 on timeout-killed QEMU (normal) and writes the log file.
 define boot-and-capture
 	@mkdir -p $(BUILD_DIR)
 	@rm -f $(1)
-	@(timeout 60s qemu-system-x86_64 -M q35 -m 64M -cdrom $(ISO) \
+	python3 -c "import os; os.makedirs('build', exist_ok=True); f='build/disk.img'; open(f, 'wb').write(b'\x00'*65536) if not os.path.exists(f) or os.path.getsize(f) < 65536 else None" || python -c "import os; os.makedirs('build', exist_ok=True); f='build/disk.img'; open(f, 'wb').write(b'\x00'*65536) if not os.path.exists(f) or os.path.getsize(f) < 65536 else None"
+	@(timeout 60s qemu-system-x86_64 -M pc -m 64M -cdrom $(ISO) \
 		-serial file:$(1) -debugcon stdio -no-reboot -no-shutdown -display none \
 		-netdev user,id=n0 -device virtio-net-pci,netdev=n0 \
+		-drive file=build/disk.img,format=raw,media=disk \
 		|| test $$? -eq 124)
 endef
 
@@ -351,7 +356,7 @@ verify-boot-all: verify-boot verify-boot-vmm verify-boot-heap
 	@echo "All boot verifications passed"
 
 debug-gdb: $(ISO)
-	qemu-system-x86_64 -M q35 -m 64M -cdrom $(ISO) \
+	qemu-system-x86_64 -M pc -m 64M -cdrom $(ISO) \
 		-serial file:$(SERIAL_LOG) -S -s -no-reboot -no-shutdown
 
 clean:

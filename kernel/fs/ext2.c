@@ -215,6 +215,14 @@ static int ext2_file_read(struct vfs_node *node, size_t offset, void *buf, size_
     return (int)bytes_copied;
 }
 
+static void ext2_flush_to_disk(void)
+{
+    struct vfs_node *hda = vfs_lookup("/dev/hda");
+    if (hda != 0 && hda->write != 0) {
+        hda->write(hda, 0, ext2_disk_data, 64 * 1024);
+    }
+}
+
 int ext2_file_write(struct vfs_node *node, size_t offset, const void *buf, size_t count)
 {
     struct vfs_node *ram0 = vfs_lookup("/dev/ram0");
@@ -276,6 +284,7 @@ int ext2_file_write(struct vfs_node *node, size_t offset, const void *buf, size_
         in->i_size = (uint32_t)node->size;
     }
 
+    ext2_flush_to_disk();
     return (int)bytes_written;
 }
 
@@ -295,17 +304,41 @@ int ext2_truncate(struct vfs_node *node, size_t new_size)
     struct ext2_inode *in = &inodes[evd->inode_num - 1];
     in->i_size = 0;
     node->size = 0;
+
+    ext2_flush_to_disk();
     return 0;
 }
 
 void ext2_init(void)
 {
-    init_ext2_image(ext2_disk_data);
-
     vfs_create_device("/dev/ram0", ram0_read, ram0_write);
     struct vfs_node *ram0 = vfs_lookup("/dev/ram0");
     if (ram0) {
         ram0->data = ext2_disk_data;
+    }
+
+    struct vfs_node *hda = vfs_lookup("/dev/hda");
+    if (hda != 0 && hda->read != 0) {
+        printk("ext2: /dev/hda detected, loading filesystem from disk...\n");
+        int r = hda->read(hda, 0, ext2_disk_data, 64 * 1024);
+        if (r < 0) {
+            printk("ext2: ERROR: failed to read from /dev/hda (got %d)\n", r);
+            init_ext2_image(ext2_disk_data);
+        } else {
+            struct ext2_superblock *sb = (struct ext2_superblock *)(ext2_disk_data + 1024);
+            if (sb->s_magic == EXT2_SUPER_MAGIC) {
+                printk("ext2: valid superblock magic found on /dev/hda!\n");
+            } else {
+                printk("ext2: invalid superblock magic on /dev/hda, formatting...\n");
+                init_ext2_image(ext2_disk_data);
+                if (hda->write != 0) {
+                    hda->write(hda, 0, ext2_disk_data, 64 * 1024);
+                }
+            }
+        }
+    } else {
+        printk("ext2: no /dev/hda detected, using pure memory /dev/ram0\n");
+        init_ext2_image(ext2_disk_data);
     }
 
     vfs_create_file("/ext2", VFS_TYPE_DIR, 0, 0);
@@ -328,5 +361,5 @@ void ext2_init(void)
         }
     }
 
-    printk("ext2: /dev/ram0 block device initialized and mounted on /ext2\n");
+    printk("ext2: block device initialized and mounted on /ext2\n");
 }
