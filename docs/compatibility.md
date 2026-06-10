@@ -1,53 +1,49 @@
 # LiteNix Linux ABI Compatibility Matrix
 
-This matrix documents the verification status of various Linux userspace programs and test suites under LiteNix. It is updated at each phase to honestly track what works, what fails, and what is missing.
+This matrix documents the verification status of various Linux userspace programs and test suites under LiteNix. It is updated at each milestone to honestly track what works, what fails, and what is missing.
 
-## Phase 1 Baseline
+> **Rule:** No compatibility claim is made without a named test and serial log evidence.
 
-**Verification:** `make verify-boot` PASS (2026-06-08)
+---
 
-## Phase 2: Real VMA and Page-Fault Infrastructure
+## Current Status
 
-**Verification:** `make verify-boot` PASS (2026-06-08)
+**Last full verification:** `make verify-boot` — 2026-06-10
 
-**Completed Features:**
-- Proper per-process Virtual Memory Area (VMA) allocation replacing the old bump allocator.
-- VMA lookup, overlap detection, splitting, and merging.
-- Lazy demand paging for anonymous `mmap` (pages allocated, zero-filled, and mapped on-demand).
-- Validation-time on-demand page mapping in `vmm_validate_user_ptr_ex` to support syscall copy operations.
-- VMA permission checks during page faults. Userspace memory violations safely trigger SIGSEGV and clean process termination.
+**Passing markers (all required):**
 
-**Verification Suite Additions (in `/tests/test_all`):**
-- Lazy page fault allocation validation.
-- Invalid size checks.
-- Accessing unmapped memory after `munmap` (triggers child SIGSEGV verification).
-- Writing to a page protected to read-only via `mprotect` (triggers child SIGSEGV verification).
-- Accessing memory mapped with `PROT_NONE` (triggers child SIGSEGV verification).
-- Overlapping mmap replacement using `MAP_FIXED` (triggers replacement and fresh zero-fill).
+| Marker | Status |
+|--------|--------|
+| `VMM: address-space self-test passed` | ✅ |
+| `VMM: negative self-test passed` | ✅ |
+| `VMM: permission self-test passed` | ✅ |
+| `Heap: self-test passed` | ✅ |
+| `Sched: initialized` | ✅ |
+| `Sched: timer preemption started` | ✅ |
+| `Net: Initialized network protocol stack` | ✅ |
+| `UDP Echo Server listening on port 9999` | ✅ |
+| `TCP HTTP Server listening on port 80` | ✅ |
+| `ext2: found /ext2/hello.txt` | ✅ (real disk or fallback) |
+| `Test 16: PASSED` | ✅ |
+| `Test 22: PASSED` | ✅ |
+| `Hello from dynamic musl!` | ✅ |
+| `Test 23: PASSED` | ✅ |
+| `All VFS Verification Tests Passed!` | ✅ |
+| `Test 26: PASSED` | ✅ |
+| `All shell tests PASSED` | ✅ |
+| `Phase 9 & 10: init program exited with 0 OK` | ✅ |
+| No `Init ERROR` | ✅ |
+| No `KERNEL PANIC` | ✅ |
+| No `CPU exception` | ✅ |
 
-**Test Suite Results (all 19 tests PASSED):**
+---
 
-**Verification:** `powershell -ExecutionPolicy Bypass -File scripts\ci-boot.ps1` PASS (2026-06-08)
+## Test Suite Results (26 Tests)
 
-**Completed Features:**
-- Proper per-process Virtual Memory Area (VMA) allocation replacing the old bump allocator.
-- VMA lookup, overlap detection, splitting, and merging.
-- Lazy demand paging for anonymous `mmap` (pages allocated, zero-filled, and mapped on-demand).
-- Validation-time on-demand page mapping in `vmm_validate_user_ptr_ex` to support syscall copy operations.
-- VMA permission checks during page faults. Userspace memory violations safely trigger SIGSEGV and clean process termination.
-
-**Verification Suite Additions (in `/tests/test_all`):**
-- Lazy page fault allocation validation.
-- Invalid size checks.
-- Accessing unmapped memory after `munmap` (triggers child SIGSEGV verification).
-- Writing to a page protected to read-only via `mprotect` (triggers child SIGSEGV verification).
-- Accessing memory mapped with `PROT_NONE` (triggers child SIGSEGV verification).
-- Overlapping mmap replacement using `MAP_FIXED` (triggers replacement and fresh zero-fill).
-
-**Test Suite Results (all 19 tests PASSED):**
+All init verification tests must pass for `make verify-boot` to succeed.
 
 | # | Test | Evidence String |
-|---|------|-----------------|
+|---|------|--------------------|
 | 1 | Reading /hello.txt | `Test 1: PASSED` |
 | 2 | VFS / stat / open / read / close | `Test 2: PASSED` |
 | 3 | VFS directory listing | `Test 3: PASSED` |
@@ -63,50 +59,69 @@ This matrix documents the verification status of various Linux userspace program
 | 13 | lazy anonymous mmap / munmap | `Test 13: PASSED` |
 | 14 | pipes / poll | `Test 14: PASSED` |
 | 15 | clock_gettime / gettimeofday / sleep | `Test 15: PASSED` |
-| 16 | EXT2 and tmpfs | `Test 16: PASSED` |
+| 16 | EXT2 and tmpfs write/readback | `Test 16: PASSED` |
 | 17 | socket creation / binding | `Test 17: PASSED` |
 | 18 | static musl hello world | `Hello from musl!` + `Test 18: PASSED` |
 | 19 | Bad executable / pointer rejection | `Test 19: PASSED` |
-| 20 | File-backed mmap read / offset / beyond-EOF / private-write / bad-fd / misaligned-offset | `Test 20: PASSED` |
+| 20 | File-backed mmap (read/offset/beyond-EOF/private-write/bad-fd/misaligned) | `Test 20: PASSED` |
+| 21 | Dynamic linker error paths | `Test 21: PASSED` |
+| 22 | Dynamic musl hello | `Hello from dynamic musl!` + `Test 22: PASSED` |
+| 23 | BusyBox applets and symlink behavior | `Test 23: PASSED` |
+| 24 | Process group/session behavior | `Test 24: PASSED` |
+| 25 | Signal action/blocking/handler delivery | `Test 25: PASSED` |
+| 26 | Persistent ext2 disk read from ATA | `Test 26: PASSED` |
 
-**No CPU exceptions** outside expected user-space negative tests.
-**No kernel panics.**
-
-For machine-readable scoreboard, see [compatibility_scoreboard.csv](./compatibility_scoreboard.csv).
+---
 
 ## Compatibility Scoreboard
 
-| Binary Name | Static/Dynamic | Libc Type | Required Syscalls | Pass/Fail | Last Verified Date | Serial Log Evidence |
-|-------------|----------------|-----------|-------------------|-----------|--------------------|---------------------|
-| **Raw Syscall Suite** (`test_all`) | Static | None (Direct) | `write`, `exit_group`, `openat`, `read`, `close`, `newfstatat`, `brk`, `mmap`, `munmap`, `getpid`, `gettid`, `uname`, `clock_gettime`, `nanosleep`, `getrandom` | **PASS** | 2026-06-08 | `RAWSYSCALL: all tests passed` |
-| **Static Musl Hello** (`hello_musl`) | Static | musl | `writev`, `exit_group`, `readv` | **PASS** | 2026-06-08 | `Hello from musl!\nargc = 3\nargv[0] = /bin/hello_musl` |
-| **Static BusyBox** | Static | musl | `chmod`, `fchmod`, `chown`, `fchown`, `lchown`, `umask`, `mkdirat`, `fchownat`, `unlinkat`, `renameat`, `symlinkat`, `readlinkat`, `fchmodat`, `dup3`, `renameat2`, `symlink`, `readlink` | **PASS** | 2026-06-09 | `Test 23: PASSED` printed in serial log |
-| **Dynamic Binary Test** | Dynamic | N/A | `mmap` (file-backed), `PT_INTERP` loader, auxiliary vectors | **PASS** | 2026-06-09 | `Dynamic kernel loader path works!` in serial log |
-| **Dynamic Musl Hello** | Dynamic | musl | Full musl dynamic linker, shared libs, relocation | **PASS** | 2026-06-09 | `Hello from dynamic musl!` printed in serial log |
-| **BusyBox Shell** | Static | musl | `setsid`, `setpgid`, TTY line discipline, signal frame delivery | **Fail (Target)** | 2026-06-08 | N/A (Blocked by Phase 6 terminal / signals) |
+For machine-readable data, see [compatibility_scoreboard.csv](./compatibility_scoreboard.csv).
+
+| Binary | Static/Dynamic | Libc | Key Syscalls | Pass/Fail | Last Verified | Serial Evidence |
+|--------|---------------|------|--------------|-----------|---------------|-----------------|
+| **Raw Syscall Suite** (`test_all`) | Static | None | `write`, `exit_group`, `openat`, `read`, `close`, `newfstatat`, `brk`, `mmap`, `munmap`, `getpid`, `gettid`, `uname`, `clock_gettime`, `nanosleep`, `getrandom` | **PASS** | 2026-06-10 | `RAWSYSCALL: all tests passed` |
+| **Static Musl Hello** (`hello_musl`) | Static | musl | `writev`, `exit_group`, `readv` | **PASS** | 2026-06-10 | `Hello from musl!\nargc = 3` |
+| **Static BusyBox** | Static | musl | `chmod`, `fchmod`, `chown`, `fchown`, `lchown`, `umask`, `mkdirat`, `fchownat`, `unlinkat`, `renameat`, `symlinkat`, `readlinkat`, `fchmodat`, `dup3`, `renameat2`, `symlink`, `readlink` | **PASS** | 2026-06-10 | `Test 23: PASSED` |
+| **Dynamic Binary** | Dynamic | None | `mmap` (file-backed), PT_INTERP loader, auxv | **PASS** | 2026-06-10 | `Dynamic kernel loader path works!` |
+| **Dynamic Musl Hello** | Dynamic | musl | musl dynamic linker, shared libs, relocation | **PASS** | 2026-06-10 | `Hello from dynamic musl!` |
+| **BusyBox Shell** | Static | musl | `setsid`, `setpgid`, TTY, signal frame | **PASS** | 2026-06-10 | `All shell tests PASSED` |
+| **Persistent EXT2 Read** | N/A | N/A | ATA PIO block read, ext2 inode walk | **PASS** | 2026-06-10 | `Test 26: PASSED` |
+| **EXT2 Write + Readback** | N/A | N/A | `O_TRUNC`, `write`, `read`, `ram_truncate` | **PASS** | 2026-06-10 | `Test 16: PASSED` |
 
 ---
 
-## Syscall Support Summary for Static Binaries
+## Bug Fixes Applied
 
-The following system calls have been verified and validated against bad user pointer inputs:
-
-- **Process / Thread**: `exit` (60), `exit_group` (231), `getpid` (39), `gettid` (186), `getppid` (110), `fork` (57), `wait4` (61), `clone` (56 - thread setup), `set_tid_address` (218).
-- **Filesystem**: `read` (0), `write` (1), `readv` (19), `writev` (20), `open` (2), `openat` (257), `close` (3), `lseek` (8), `stat` (4), `fstat` (5), `lstat` (6), `fstatat` (262), `statx` (332 - stub), `access` (21), `faccessat` (269), `readlink` (89), `readlinkat` (267), `getdents64` (217), `mkdir` (83), `mkdirat` (258), `unlink` (87), `unlinkat` (263), `rmdir` (84), `dup` (32), `dup2` (33), `dup3` (292), `chmod` (90), `fchmod` (91), `fchmodat` (268), `chown` (92), `fchown` (93), `lchown` (94), `fchownat` (260), `umask` (95), `renameat` (264), `renameat2` (316), `symlink` (88), `symlinkat` (266).
-- **Memory**: `brk` (12), `mmap` (9 - anonymous memory / lazy demand paging / file-backed MAP_PRIVATE), `munmap` (11).
-- **Time & Sync**: `clock_gettime` (228), `gettimeofday` (96), `nanosleep` (35), `futex` (202 - wait/wake).
-- **System**: `uname` (63), `getrandom` (318), `getrlimit` (97), `prlimit64` (302), `set_robust_list` (273), `get_robust_list` (274).
+| Date | Bug | Fix |
+|------|-----|-----|
+| 2026-06-10 | EXT2 read-after-write mismatch (stale buffer bytes returned after O_TRUNC+write on memory-fallback node) causing KERNEL PANIC | Added `ram_truncate()` to `kernel/fs/ext2.c` and wired it to the memory-fallback VFS node's `truncate` callback. Zeros old buffer content on truncate-to-zero. |
+| 2026-06-10 | `make_ext2.py` inode struct issues and block overlaps — ext2 directory block number was read from wrong struct field (missing `i_osd1`), and the hardcoded root directory/hello.txt blocks overlapped with the inode table. | Added missing `i_osd1` to packing, transitioned to a proper `alloc_block()` model for all metadata/files, and ensured root directory and data blocks are outside the reserved inode table range. |
 
 ---
 
-## Build and Run Details
+## Known Limitations
 
-To build the static musl hello world test executable:
+| Area | Status | Notes |
+|------|--------|-------|
+| Persistent ext2 write | **Partial** | Memory-fallback write works (Test 16). Real ATA disk write path available but disk content resets each boot (disk.img regenerated by make). |
+| TTY / job control | **Partial** | BusyBox sh smoke tests pass; vi, Ctrl+Z, job control SIGTSTP not fully implemented |
+| Networking | **Partial** | ARP, ICMP, UDP echo, basic TCP; no retransmit, DHCP, or DNS |
+| Signals | **Partial** | rt_sigaction, rt_sigprocmask, rt_sigreturn implemented; SIGCHLD to parent delivery partial |
+| User permissions | **Not started** | All processes run as UID 0; permission checks on file access not enforced |
+
+---
+
+## Build and Run
+
 ```bash
-zig cc -target x86_64-linux-musl -static hello_musl.c -o hello_musl
+# Build and verify
+make verify-boot
+
+# Interactive run
+make run
 ```
 
-To run the complete verification suite under QEMU:
 ```powershell
+# PowerShell CI script
 powershell -ExecutionPolicy Bypass -File scripts\ci-boot.ps1
 ```

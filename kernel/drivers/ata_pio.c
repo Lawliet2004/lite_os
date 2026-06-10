@@ -22,15 +22,20 @@
 
 static void ata_wait_bsy(void)
 {
-    while (inb(ATA_PRIMARY_STATUS) & 0x80) { }
+    uint32_t timeout = 1000000;
+    while ((inb(ATA_PRIMARY_STATUS) & 0x80) && timeout > 0) {
+        timeout--;
+    }
 }
 
 static void ata_wait_drq(void)
 {
-    while (!(inb(ATA_PRIMARY_STATUS) & 0x08)) {
+    uint32_t timeout = 1000000;
+    while (!(inb(ATA_PRIMARY_STATUS) & 0x08) && timeout > 0) {
         if (inb(ATA_PRIMARY_STATUS) & 0x01) {
             break; // Error
         }
+        timeout--;
     }
 }
 
@@ -40,8 +45,8 @@ static int ata_read_blocks(struct block_device *dev, uint64_t lba, uint32_t coun
     uint16_t *ptr = (uint16_t *)buf;
 
     for (uint32_t i = 0; i < count; i++) {
-        uint32_t current_lba = lba + i;
-        
+        uint32_t current_lba = (uint32_t)lba + i;
+
         ata_wait_bsy();
         outb(ATA_PRIMARY_DRV_HEAD, 0xE0 | ((current_lba >> 24) & 0x0F));
         outb(ATA_PRIMARY_SECCOUNT, 1);
@@ -67,8 +72,8 @@ static int ata_write_blocks(struct block_device *dev, uint64_t lba, uint32_t cou
     const uint16_t *ptr = (const uint16_t *)buf;
 
     for (uint32_t i = 0; i < count; i++) {
-        uint32_t current_lba = lba + i;
-        
+        uint32_t current_lba = (uint32_t)lba + i;
+
         ata_wait_bsy();
         outb(ATA_PRIMARY_DRV_HEAD, 0xE0 | ((current_lba >> 24) & 0x0F));
         outb(ATA_PRIMARY_SECCOUNT, 1);
@@ -84,8 +89,7 @@ static int ata_write_blocks(struct block_device *dev, uint64_t lba, uint32_t cou
             outw(ATA_PRIMARY_DATA, ptr[j]);
         }
         ptr += 256;
-        
-        // Wait for write to finish
+
         outb(ATA_PRIMARY_CMD, ATA_CMD_CACHE_FLUSH);
         ata_wait_bsy();
     }
@@ -100,127 +104,14 @@ static int ata_flush(struct block_device *dev)
     return 0;
 }
 
-static struct block_device ata_dev = {
-    .name = "hda",
-    .sector_count = 0,
-    .sector_size = 512,
-    .read_blocks = ata_read_blocks,
-    .write_blocks = ata_write_blocks,
-    .flush = ata_flush,
-    .private_data = 0
-};
+static struct block_device ata_devices[2];
+static int ata_device_count = 0;
 
-static int hda_read(struct vfs_node *node, size_t offset, void *buf, size_t count)
+void ata_init_device(uint8_t drive_bit)
 {
-    struct block_device *dev = (struct block_device *)node->data;
-    if (!dev || !dev->read_blocks) return -EIO;
+    outb(ATA_PRIMARY_DRV_HEAD, drive_bit);
+    for (int i = 0; i < 15; i++) inb(ATA_PRIMARY_STATUS); // delay
 
-    uint64_t max_bytes = dev->sector_count * dev->sector_size;
-    if (offset >= max_bytes) return 0;
-    if (offset + count > max_bytes) {
-        count = max_bytes - offset;
-    }
-
-    uint32_t sector_size = dev->sector_size;
-    uint64_t start_sector = offset / sector_size;
-    uint32_t offset_in_sector = offset % sector_size;
-
-    uint8_t temp[512];
-    size_t bytes_read = 0;
-
-    if (offset_in_sector != 0) {
-        if (dev->read_blocks(dev, start_sector, 1, temp) != 0) {
-            return -EIO;
-        }
-        size_t chunk = sector_size - offset_in_sector;
-        if (chunk > count) chunk = count;
-        memcpy(buf, temp + offset_in_sector, chunk);
-        bytes_read += chunk;
-        start_sector++;
-    }
-
-    size_t remaining = count - bytes_read;
-    uint32_t aligned_sectors = remaining / sector_size;
-    if (aligned_sectors > 0) {
-        if (dev->read_blocks(dev, start_sector, aligned_sectors, (uint8_t *)buf + bytes_read) != 0) {
-            return -EIO;
-        }
-        bytes_read += aligned_sectors * sector_size;
-        start_sector += aligned_sectors;
-    }
-
-    remaining = count - bytes_read;
-    if (remaining > 0) {
-        if (dev->read_blocks(dev, start_sector, 1, temp) != 0) {
-            return -EIO;
-        }
-        memcpy((uint8_t *)buf + bytes_read, temp, remaining);
-        bytes_read += remaining;
-    }
-
-    return (int)bytes_read;
-}
-
-static int hda_write(struct vfs_node *node, size_t offset, const void *buf, size_t count)
-{
-    struct block_device *dev = (struct block_device *)node->data;
-    if (!dev || !dev->write_blocks) return -EIO;
-
-    uint64_t max_bytes = dev->sector_count * dev->sector_size;
-    if (offset >= max_bytes) return -ENOSPC;
-    if (offset + count > max_bytes) {
-        count = max_bytes - offset;
-    }
-
-    uint32_t sector_size = dev->sector_size;
-    uint64_t start_sector = offset / sector_size;
-    uint32_t offset_in_sector = offset % sector_size;
-
-    uint8_t temp[512];
-    size_t bytes_written = 0;
-
-    if (offset_in_sector != 0) {
-        if (dev->read_blocks(dev, start_sector, 1, temp) != 0) {
-            return -EIO;
-        }
-        size_t chunk = sector_size - offset_in_sector;
-        if (chunk > count) chunk = count;
-        memcpy(temp + offset_in_sector, buf, chunk);
-        if (dev->write_blocks(dev, start_sector, 1, temp) != 0) {
-            return -EIO;
-        }
-        bytes_written += chunk;
-        start_sector++;
-    }
-
-    size_t remaining = count - bytes_written;
-    uint32_t aligned_sectors = remaining / sector_size;
-    if (aligned_sectors > 0) {
-        if (dev->write_blocks(dev, start_sector, aligned_sectors, (const uint8_t *)buf + bytes_written) != 0) {
-            return -EIO;
-        }
-        bytes_written += aligned_sectors * sector_size;
-        start_sector += aligned_sectors;
-    }
-
-    remaining = count - bytes_written;
-    if (remaining > 0) {
-        if (dev->read_blocks(dev, start_sector, 1, temp) != 0) {
-            return -EIO;
-        }
-        memcpy(temp, (const uint8_t *)buf + bytes_written, remaining);
-        if (dev->write_blocks(dev, start_sector, 1, temp) != 0) {
-            return -EIO;
-        }
-        bytes_written += remaining;
-    }
-
-    return (int)bytes_written;
-}
-
-void ata_init(void)
-{
-    outb(ATA_PRIMARY_DRV_HEAD, 0xA0);
     outb(ATA_PRIMARY_SECCOUNT, 0);
     outb(ATA_PRIMARY_LBA_LO, 0);
     outb(ATA_PRIMARY_LBA_MID, 0);
@@ -228,18 +119,10 @@ void ata_init(void)
     outb(ATA_PRIMARY_CMD, ATA_CMD_IDENTIFY);
 
     uint8_t status = inb(ATA_PRIMARY_STATUS);
-    if (status == 0 || status == 0xFF) {
-        // No drive or floating bus
-        return;
-    }
+    if (status == 0 || status == 0xFF) return;
 
     ata_wait_bsy();
-    uint8_t mid = inb(ATA_PRIMARY_LBA_MID);
-    uint8_t hi = inb(ATA_PRIMARY_LBA_HI);
-    if (mid != 0 || hi != 0) {
-        // Not ATA
-        return;
-    }
+    if (inb(ATA_PRIMARY_LBA_MID) != 0 || inb(ATA_PRIMARY_LBA_HI) != 0) return;
 
     ata_wait_drq();
 
@@ -248,17 +131,34 @@ void ata_init(void)
         identify[i] = inw(ATA_PRIMARY_DATA);
     }
 
-    uint32_t sectors = *((uint32_t *)&identify[60]);
-    ata_dev.sector_count = sectors;
+    uint32_t sectors;
+    memcpy(&sectors, &identify[60], 4);
+    if (sectors == 0) return;
 
-    printk("ATA: found drive %s, %u sectors (%u MB)\n", ata_dev.name, sectors, (sectors * 512) / (1024 * 1024));
+    struct block_device *dev = &ata_devices[ata_device_count];
+    dev->name[0] = 'h';
+    dev->name[1] = 'd';
+    dev->name[2] = 'a' + ata_device_count;
+    dev->name[3] = '\0';
+    dev->sector_count = sectors;
+    dev->sector_size = 512;
+    dev->read_blocks = ata_read_blocks;
+    dev->write_blocks = ata_write_blocks;
+    dev->flush = ata_flush;
+    dev->private_data = (void *)(uintptr_t)drive_bit;
 
-    block_device_register(&ata_dev);
+    printk("ATA: found drive %s, %u sectors (%u MB)\n", dev->name, sectors, (sectors * 512) / (1024 * 1024));
 
-    // Register /dev/hda device node in VFS
-    vfs_create_device("/dev/hda", hda_read, hda_write);
-    struct vfs_node *hda_node = vfs_lookup("/dev/hda");
-    if (hda_node) {
-        hda_node->data = &ata_dev;
-    }
+    block_device_register(dev);
+
+    extern void vfs_register_block_device(struct block_device *dev);
+    vfs_register_block_device(dev);
+
+    ata_device_count++;
+}
+
+void ata_init(void)
+{
+    ata_init_device(0xA0); // Primary Master
+    ata_init_device(0xB0); // Primary Slave
 }

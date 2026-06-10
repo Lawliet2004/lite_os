@@ -1,7 +1,26 @@
 build/
+build_*/
+build_locked*/
+disk.img
+*.img
+*.iso
+*.elf
+*.o
+*.log
+*.log.txt
+ci-boot-temp.log*
+hello_musl
+graphify-out/
+.commandcode/
+.kimchi/
 
 # Local bootloader artifacts. See toolchain/README.md.
 toolchain/limine/
+
+# Local tool caches.
+.cache/
+.zig-cache/
+zig-cache/
 
 # Editor and OS noise.
 .vscode/

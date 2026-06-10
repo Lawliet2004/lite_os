@@ -102,6 +102,10 @@ typedef int (*vfs_read_t)(struct vfs_node *node, size_t offset, void *buf, size_
 typedef int (*vfs_write_t)(struct vfs_node *node, size_t offset, const void *buf, size_t count);
 typedef int (*vfs_readdir_t)(struct vfs_node *node, size_t index, struct vfs_dirent *dirent);
 typedef int (*vfs_close_t)(struct vfs_node *node, struct file *f);
+typedef int (*vfs_truncate_t)(struct vfs_node *node, size_t new_size);
+typedef int (*vfs_create_t)(struct vfs_node *parent, const char *name, uint32_t mode, struct vfs_node **out_node);
+typedef int (*vfs_mkdir_t)(struct vfs_node *parent, const char *name, uint32_t mode);
+typedef int (*vfs_unlink_t)(struct vfs_node *parent, const char *name);
 
 struct vfs_node {
     char name[128];
@@ -124,6 +128,11 @@ struct vfs_node {
     vfs_write_t write;
     vfs_readdir_t readdir;
     vfs_close_t close;
+    vfs_truncate_t truncate;
+    vfs_create_t create;
+    vfs_mkdir_t mkdir;
+    vfs_unlink_t unlink;
+    int (*rename)(struct vfs_node *old_parent, const char *old_name, struct vfs_node *new_parent, const char *new_name);
 };
 
 struct file {

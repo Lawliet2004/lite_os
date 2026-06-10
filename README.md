@@ -6,74 +6,34 @@ diagnostics over both VGA text output and COM1 serial.
 
 ## Current Scope
 
-This repository currently implements the early kernel foundation plus partial
-Linux-like userspace support. Phases 0 through 13 are substantially present,
-with partial work beyond that for process control, memory mapping, pipes, time,
-storage, and networking:
+LiteNix currently implements a functional x86_64 kernel foundation with partial
+Linux-like userspace support. It is transitioning from a "teaching kernel" to a
+"minimal CLI distro".
 
-- repository structure
-- Limine boot configuration
-- minimal x86_64 kernel entry
-- serial COM1 output
-- VGA text output
-- small `printk` formatter
-- `panic()` and `KASSERT()`
-- GDT and TSS setup
-- IDT entries for CPU exceptions 0-31
-- exception diagnostics for vector, error code, registers, and page-fault CR2
-- legacy PIC remapping
-- PIT timer interrupts with a boot-time tick smoke test
-- minimal keyboard IRQ acknowledgement
-- bitmap physical memory manager with 4 KiB pages
-- PMM self-test using 10,000 page allocations
-- kernel page-table map/unmap/protect/translate helpers
-- VMM self-test using a PMM-backed virtual mapping:
-  - write/readback, permission change, unmap, translation-fail checks
-  - separate user address-space creation with kernel-mapping copy
-  - CR3 switch into user address space to verify kernel continuity
-  - user/kernel address validation checks
-  - copy between address spaces (structural, SMAP enforcement in Phase 9)
-  - address-space destruction with recursive page-table page cleanup
-  - PMM page-leak detection after destruction
-- guard page support (`VMM_GUARD_PAGE_SIZE` convention)
-- segregated free-list kernel heap allocator
-- `kmalloc`, `kzalloc`, `kfree`, `krealloc`, `kmalloc_aligned`
-- heap self-test: small/medium/large allocations, krealloc grow, aligned alloc,
-  500-block allocate/free stress cycle with leak check
-- poison-pattern debug mode with double-free detection
-- process and task structures with separate PID and TID fields
-- parent/child process links for kernel-created tasks
-- kernel thread creation, exit, zombie state, wait, and reap
-- priority-based round-robin scheduler with nice -20..+19 (40 levels)
-- time-slice proportional to priority (high-priority tasks get longer slices)
-- timed sleep via `task_sleep_ticks()` with PIT-driven wakeup
-- dedicated idle task with lowest priority as CPU fallback
-- starvation prevention with periodic priority boosting
-- per-task CPU time accounting (`total_ticks`)
-- Phase 7 boot self-test: fair-share, priority ordering, and sleep/wake tests
-- Linux x86_64 `SYSCALL`/`SYSRET` ABI via EFER/STAR/LSTAR/SFMASK MSR setup
-- GDT expanded with ring-3 user code and data segments (DPL=3)
-- assembly syscall entry stub saving all GP registers as `struct syscall_frame`
-- 256-entry dispatch table; unknown calls return `-ENOSYS`
-- negative errno convention (`-EFAULT`, `-EBADF`, `-ENOSYS`, …)
-- `sys_write` (fd 1/2 → serial), `sys_exit`, `sys_exit_group` handlers
-- `copy_from_user` / `copy_to_user` with address-range and overflow validation
-- optional `SYSCALL_TRACE` compile flag for per-call tracing
-- Phase 8 boot self-test: `-ENOSYS`, `-EFAULT`, `-EBADF`, and `uaccess_ok` tests
-- ring-3 userspace transition and ELF loading for static test programs
-- initramfs-backed `/bin/init` and `/bin/sh`
-- VFS, basic file descriptors, devfs nodes, and procfs nodes
-- fork, execve, wait4, clone/futex subset, brk, lazy anonymous mmap, pipes, poll,
-  time syscalls, ext2 test storage, and socket API subset
-- additional Linux compatibility syscalls such as `openat`, `newfstatat`,
-  `gettid`, `uname`, `getrandom`, `statx`, `access`/`faccessat`, resource-limit
-  queries, and robust-list registration stubs
-- QEMU and ISO helper scripts
+### Kernel Capabilities (Stable)
+- **Boot**: Limine/BIOS, GDT, TSS, IDT, Exceptions, PIC, PIT.
+- **Memory**: PMM (Bitmap), VMM (4-level paging), Segregated Free-list Heap.
+- **Scheduler**: Priority-based round-robin with preemption and sleep/wake.
+- **Syscalls**: Linux x86_64 `SYSCALL`/`SYSRET` ABI, 250+ entries, `uaccess` validation.
+- **ELF Loader**: Static and dynamic ELF support (PT_INTERP), full auxiliary vectors.
+- **VFS**: Core abstraction, path resolution, symlinks, `devfs`, `procfs`, `tmpfs`.
 
-It does not yet implement broad Linux application compatibility. Dynamic
-linking, file-backed `mmap`, complete signals, robust futex recovery, complete
-TTY behavior, package management, browser-class applications, and a proven
-VirtualBox workflow are still future work.
+### Userspace Capabilities (Usable)
+- **C Library**: Partial `libc-lite` and full `musl` (static/dynamic) support.
+- **Init System**: `/bin/init` executes a full verification suite and starts a shell.
+- **Shell**: BusyBox `sh` with core applets (`ls`, `cat`, `mkdir`, `rm`, `cp`, `echo`).
+- **Filesystem**: Persistent EXT2 read/write on ATA disk (verified).
+- **Networking**: ARP, IPv4, ICMP, UDP (Echo Server), TCP (Basic HTTP Server).
+
+### Distro Capabilities (Experimental/Future)
+- **TTY/Signals**: Basic line discipline and signal handlers work; full job control (SIGTSTP) is future work.
+- **Permissions**: UID/GID model exists in kernel structs but enforcement is not yet implemented (UID 0 only).
+- **Packages**: No package manager yet.
+- **Build System**: Currently requires a host cross-toolchain (Zig/Clang/Nasm).
+
+It does not yet implement broad Linux application compatibility. Dynamic musl
+hello and the current BusyBox shell smoke tests pass, but complete signals,
+robust futex recovery, DHCP/DNS, and package management are future work.
 
 ## Linux Compatibility Policy
 
@@ -137,56 +97,43 @@ build/serial.log
 make verify-boot
 ```
 
-This boots QEMU with a timeout and checks the serial log for the VMM, heap, and
-Phase 7 scheduler self-test success markers. It also fails if the log contains a
-CPU exception or kernel panic.
+This boots QEMU with a timeout and checks the serial log for VMM, heap,
+scheduler initialization, networking listener, ext2, dynamic musl, BusyBox
+shell, and persistent ext2 read markers. It also fails if the log contains an
+init error, failed marker, CPU exception, or kernel panic.
 
 Expected output:
 
 ```text
 LiteNix kernel booted
-Architecture: x86_64
-Serial: initialized
-Memory map: detected
 Kernel status: OK
+Boot verification passed
 ```
 
 Phase 2/3 also prints:
 
 ```text
-GDT: initialized
-IDT: initialized
-PMM: initialized
-PMM: total=... KiB usable=... KiB free=... KiB reserved=... KiB
-PMM: bitmap=... bytes at phys=...
-PMM: self-test passed (10000 pages)
-VMM: initialized
+PMM: self-test passed (...)
 VMM: self-test passed
+VMM: address-space self-test passed
+Heap: self-test passed
 PIC: remapped
 PIT: initialized at 100 Hz
 Timer: ticks observed (...)
 ```
 
-Phase 7 scheduler output:
+Current userspace verification output includes:
 
 ```text
 Sched: initialized with 1 tasks (Phase 7)
-Sched: idle task registered (priority=19)
 Sched: timer preemption started
-phase7_equal_a: started (prio=0)
-phase7_equal_b: started (prio=0)
-phase7_equal_a: done (ticks=...)
-phase7_equal_b: done (ticks=...)
-Sched: fair-share test passed
-phase7_hipri: started (prio=-10)
-phase7_lopri: started (prio=10)
-phase7_hipri: done (ticks=...)
-phase7_lopri: done (ticks=...)
-Sched: priority test passed
-phase7_sleeper: sleeping 50 ticks
-phase7_sleeper: woke after ... ticks
-Sched: sleep test passed
-Sched: Phase 7 scheduler self-test passed
+ext2: found /ext2/hello.txt
+Hello from dynamic musl!
+Test 23: PASSED
+All VFS Verification Tests Passed!
+Test 26: PASSED
+All shell tests PASSED
+Phase 9 & 10: init program exited with 0 OK
 ```
 
 ## Exception Smoke Tests
@@ -209,5 +156,6 @@ The kernel should print CPU exception diagnostics and then panic.
 
 ## Next Step
 
-Stabilize the current partial userspace stack, then move through the
-compatibility milestones in [docs/linux-os-plan.md](docs/linux-os-plan.md).
+Keep the current verification matrix stable, then choose one small milestone:
+strengthen persistent ext2 read/write reliability, improve signal/TTY behavior,
+or add more bad-pointer syscall tests.

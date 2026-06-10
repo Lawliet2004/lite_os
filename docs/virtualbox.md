@@ -12,12 +12,21 @@ make iso
 #   Type: Other/Unknown 64-bit
 #   RAM: 64 MB to 512 MB
 #   CPU: 1 (enable PAE/NX if available)
-#   Storage: attach build/litenix.iso as optical media (SATA or IDE)
+#   Storage:
+#     - IDE Controller: attach build/litenix.iso as optical media
+#     - IDE Controller: attach disk image (e.g. disk.vdi) as hard disk
 #   Audio: disabled
 #   USB: disabled initially
 #   Network: NAT (for virtio-net) or Intel PRO/1000 MT Desktop (for e1000)
 #   Serial Port 1: Enable, Port Mode = Raw File, Path = <host-path>/serial.log
 ```
+
+## Storage Controller
+
+- LiteNix currently uses an **ATA PIO** driver for block storage.
+- VirtualBox MUST be configured with an **IDE Controller**.
+- Attach your persistent disk image to the **IDE Primary Master** (maps to `/dev/hda`) or **Slave** (maps to `/dev/hdb`).
+- **SATA (AHCI)** and **NVMe** controllers are NOT supported by the current driver.
 
 ## Boot Verification Checklist
 

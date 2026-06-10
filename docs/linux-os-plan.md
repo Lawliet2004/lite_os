@@ -22,25 +22,50 @@ and compatibility tests all agree.
 
 | Phase | Status | Missing Work |
 | --- | --- | --- |
-| **Phase 0: Stability Baseline** | **Completed** | Stable build & verification script active. |
-| **Phase 1: Linux Syscall Foundation** | **Completed** | Syscall table is compatible; negative errno returned; user pointer checks added. |
-| **Phase 2: VFS Maturity** | **Completed** | Initramfs, devfs, procfs, ext2, and fd features verified. |
-| **Phase 3: ELF Loader & Static Programs** | **Completed** | Static musl hello runs with correct argv/envp passing, and execve invalid inputs are rejected safely. |
-| **Phase 4: VMA & Page Fault Paging** | **Completed** | Process VMA management, overlap detection, splits/merges, and anonymous lazy demand paging. |
-| **Phase 5: File-backed mmap** | **Completed** | File-backed mmap MAP_PRIVATE with COW page fault loading; offset alignment validated. |
-| **Phase 6: Dynamic Linker Support** | **Completed** | PT_INTERP detection, interpreter loading with base address for ET_DYN, full auxiliary vector (AT_PHDR, AT_PHENT, AT_PHNUM, AT_BASE, AT_ENTRY, AT_RANDOM, AT_EXECFN, AT_UID, AT_EUID, AT_GID, AT_EGID, AT_SECURE), SysV stack alignment. Tested with fake interpreter. |
+| **Phase 0: Stability Baseline** | ✅ **Completed** | Stable build & verification script active. |
+| **Phase 1: Linux Syscall Foundation** | ✅ **Completed** | Syscall table is compatible; negative errno returned; user pointer checks added. |
+| **Phase 2: VFS Maturity** | ✅ **Completed** | Initramfs, devfs, procfs, ext2, and fd features verified. |
+| **Phase 3: ELF Loader & Static Programs** | ✅ **Completed** | Static musl hello runs with correct argv/envp passing, and execve invalid inputs are rejected safely. |
+| **Phase 4: VMA & Page Fault Paging** | ✅ **Completed** | Process VMA management, overlap detection, splits/merges, and anonymous lazy demand paging. |
+| **Phase 5: File-backed mmap** | ✅ **Completed** | File-backed mmap MAP_PRIVATE with COW page fault loading; offset alignment validated. |
+| **Phase 6: Dynamic Linker Support** | ✅ **Completed** | PT_INTERP detection, interpreter loading with base address for ET_DYN, full auxiliary vector (AT_PHDR, AT_PHENT, AT_PHNUM, AT_BASE, AT_ENTRY, AT_RANDOM, AT_EXECFN, AT_UID, AT_EUID, AT_GID, AT_EGID, AT_SECURE), SysV stack alignment. Tested with fake interpreter. |
+| **Phase 7: Process Groups, Signals, TTY** | ✅ **Verified slice** | Process groups, signal action/blocking tests, basic terminal line discipline, and BusyBox shell smoke tests pass. Complete POSIX signal and TTY behavior remains future work. |
+| **Phase 8: Distro Foundation** | 🔄 **In Progress** | See Phase 8 Distro Plan below. |
 
-| **Phase 7: Process Groups, Signals, TTY** | **Completed** | Process groups, signal actions/delivery, and basic terminal line discipline implemented. BusyBox shell runs. |
+## Phase 8 Distro Plan
+
+Working toward a minimal bootable CLI distro. Each sub-phase must produce serial-log evidence before proceeding.
+
+| Sub-phase | Goal | Status |
+| --- | --- | --- |
+| 8.1: Documentation Accuracy | All docs match current serial-log evidence; architecture.md, syscall-roadmap.md, compatibility.md reflect reality. | ✅ Completed |
+| 8.2: Persistent Filesystem | Stabilize ext2 write path on real ATA disk (disk.img). Write and readback persist across reboots. | ✅ Verified |
+| 8.3: Init / Service Startup | A proper init process (PID 1) launches services, handles SIGCHLD, and manages daemons. | 📋 Queued |
+| 8.4: Persistent Root Filesystem | Writable root filesystem on ext2 disk image; read-only initramfs as fallback. | 📋 Queued |
+| 8.5: Shell Environment | A usable shell environment with PATH, environment variables, job control, and TTY line discipline. | 📋 Queued |
+| 8.6: Networking | DHCP client, DNS resolver, basic TCP stability (retransmit, FIN handshake). | 📋 Queued |
+| 8.7: Package Manager | `lpkg` minimal installer: download, verify, extract, install to root filesystem. | 📋 Queued |
+| 8.8: TLS / HTTPS | TLS library (mbedTLS or WolfSSL port) for secure package download. | 📋 Queued |
+| 8.9: User Management | `/etc/passwd`, `/etc/shadow`, login, su. | 📋 Queued |
+| 8.10: Self-hosted Build | Build a simple C program inside LiteNix using an in-kernel-hosted toolchain. | 📋 Queued |
+| 8.11: Reproducible Image | Single-command image build that produces a bootable ISO with the above features. | 📋 Queued |
+| 8.12: Release Milestone | L4 milestone: reliable CLI OS with shell, persistence, networking, and package install. | 📋 Queued |
 
 ## Immediate Work Queue
 
-1. Maintain stable build and boot verification matrix on host.
-2. Complete persistent disk-backed root filesystem and VirtualBox compatibility.
-3. Enhance networking maturity (procfs/sysfs/TCP/sockets).
+1. **COMPLETE 8.1** — Architecture.md, syscall-roadmap.md, compatibility.md updated. ✅
+2. **STABILIZE 8.2** — EXT2 write/readback verified. Note: Real disk writes work but disk.img is regenerated by build system. ✅
+3. **BEGIN 8.3** — Improve init to support service management.
+4. Improve signal and TTY behavior needed by longer BusyBox shell sessions.
+5. Add `chdir` and `getcwd` syscalls needed for shell `cd`/`pwd`.
+5. Add `select`/`pselect6` needed by some musl programs.
 
 ## Current Slice
 
-The third compatibility slice completes Phase 3 by:
-- Correctly parsing and passing `argc`, `argv`, and `envp` onto the user stack for static musl program execution.
-- Standardizing the `sys_execve` error cases (`-EFAULT`, `-ENOENT`, `-EACCES`, `-ENOEXEC`) and validating all user inputs.
-- Verifying the boot output and checking rejection constraints via userspace integration tests.
+The current compatibility slice is a verified CLI smoke path:
+- QEMU positive boot verification passes with no kernel panic or unexpected CPU exception.
+- Dynamic musl hello prints `Hello from dynamic musl!`.
+- BusyBox shell smoke tests print `All shell tests PASSED`.
+- Persistent ext2 image generation and `/ext2/hello.txt` read print `Test 26: PASSED`.
+- EXT2 write/readback (Test 16) passes — fixed `ram_truncate` on memory-fallback node.
+

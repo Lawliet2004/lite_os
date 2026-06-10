@@ -12,4 +12,6 @@ dynamic_interp_test,Dynamic,N/A,mmap (file-backed);PT_INTERP;auxiliary vectors,P
 dynamic_musl_hello,Dynamic,musl,Full musl dynamic linker; shared libs; relocation,PASS,2026-06-09,Hello from dynamic musl! printed in serial log
 test_mmap_file,Static,None (Direct syscalls),openat;read;write;close;mmap;munmap;newfstatat;exit_group,PASS,2026-06-09,FILE_MMAP: all tests passed
 static_busybox,Static,musl,chmod;fchmod;chown;fchown;lchown;umask;mkdirat;fchownat;unlinkat;renameat;symlinkat;readlinkat;fchmodat;dup3;renameat2;symlink;readlink,PASS,2026-06-09,Test 23: PASSED
-busybox_shell,Static,musl,setsid;setpgid;TTY line discipline;signal frame delivery,PASS,2026-06-09,All shell tests PASSED
+busybox_shell,Static,musl,setsid;setpgid;TTY line discipline;signal frame delivery,PASS,2026-06-10,All shell tests PASSED
+persistent_ext2_write,Static,libc-lite,ext2_alloc_block;ext2_alloc_inode;ext2_add_entry;cross-boot persistence,PASS,2026-06-10,Test 28: PASSED (Reboot Persistence)
+persistent_ext2_read,N/A,N/A,ATA PIO block read;ext2 root directory walk;VFS open/read/close,PASS,2026-06-10,Test 26: PASSED

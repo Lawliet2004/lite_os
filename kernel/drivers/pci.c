@@ -35,34 +35,45 @@ void pci_init(void)
     printk("PCI: Scanning bus...\n");
     pci_device_count = 0;
 
-    for (int bus = 0; bus < 8; bus++) {
+    for (int bus = 0; bus < 4; bus++) {
         for (int slot = 0; slot < 32; slot++) {
-            uint32_t reg0 = pci_read_config(bus, slot, 0, 0);
-            uint16_t vendor_id = reg0 & 0xFFFF;
-            if (vendor_id == 0xFFFF || vendor_id == 0) continue;
+            for (int func = 0; func < 8; func++) {
+                uint32_t reg0 = pci_read_config(bus, slot, func, 0);
+                uint16_t vendor_id = reg0 & 0xFFFF;
+                if (vendor_id == 0xFFFF || vendor_id == 0) {
+                    if (func == 0) break;
+                    continue;
+                }
 
-            uint16_t device_id = (reg0 >> 16) & 0xFFFF;
-            uint32_t bar0 = pci_read_config(bus, slot, 0, 0x10);
-            uint32_t bar1 = pci_read_config(bus, slot, 0, 0x14);
-            uint32_t reg15 = pci_read_config(bus, slot, 0, 0x3C);
-            uint8_t irq_line = reg15 & 0xFF;
+                uint16_t device_id = (reg0 >> 16) & 0xFFFF;
+                uint32_t bar0 = pci_read_config(bus, slot, func, 0x10);
+                uint32_t bar1 = pci_read_config(bus, slot, func, 0x14);
+                uint32_t reg15 = pci_read_config(bus, slot, func, 0x3C);
+                uint8_t irq_line = reg15 & 0xFF;
 
-            printk("  PCI: %02x:%02x.0 - vendor=%04x device=%04x bar0=%08x irq=%d\n",
-                   bus, slot, vendor_id, device_id, bar0, irq_line);
+                printk("  PCI: %x:%x.%d - vendor=%x device=%x bar0=%x irq=%d\n",
+                       bus, slot, func, vendor_id, device_id, bar0, irq_line);
 
-            if (pci_device_count < 32) {
-                struct pci_device *dev = &pci_devices[pci_device_count++];
-                dev->bus = bus;
-                dev->slot = slot;
-                dev->func = 0;
-                dev->vendor_id = vendor_id;
-                dev->device_id = device_id;
-                dev->bar0 = bar0;
-                dev->bar1 = bar1;
-                dev->irq_line = irq_line;
+                if (pci_device_count < 32) {
+                    struct pci_device *dev = &pci_devices[pci_device_count++];
+                    dev->bus = (uint8_t)bus;
+                    dev->slot = (uint8_t)slot;
+                    dev->func = (uint8_t)func;
+                    dev->vendor_id = vendor_id;
+                    dev->device_id = device_id;
+                    dev->bar0 = bar0;
+                    dev->bar1 = bar1;
+                    dev->irq_line = irq_line;
+                }
+
+                if (func == 0) {
+                    uint32_t header_type = (pci_read_config(bus, slot, 0, 0x0C) >> 16) & 0xFF;
+                    if (!(header_type & 0x80)) break;
+                }
             }
         }
     }
+    printk("PCI: Scan complete\n");
 }
 
 bool pci_find_device(uint16_t vendor_id, uint16_t device_id, struct pci_device *out_dev)

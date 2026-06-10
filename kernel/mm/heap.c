@@ -158,6 +158,7 @@ void heap_init(void)
 
     memset(&stats, 0, sizeof(stats));
     initialized = true;
+    printk("Heap: alloc_header=%u slab_header=%u\n", (uint32_t)sizeof(struct alloc_header), (uint32_t)sizeof(struct slab_header));
 }
 
 void *kmalloc(size_t size)

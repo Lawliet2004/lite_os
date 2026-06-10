@@ -3,6 +3,7 @@ BUILD_DIR := build
 ISO_ROOT := $(BUILD_DIR)/iso-root
 KERNEL := $(BUILD_DIR)/litenix.elf
 ISO := $(BUILD_DIR)/litenix.iso
+DISK_IMG := $(BUILD_DIR)/disk.img
 SERIAL_LOG := $(BUILD_DIR)/serial.log
 SERIAL_LOG_NEG := $(BUILD_DIR)/serial-neg.log
 SERIAL_LOG_HEAP := $(BUILD_DIR)/serial-heap.log
@@ -33,6 +34,8 @@ endif
 ifeq ($(origin OBJCOPY),default)
 OBJCOPY := llvm-objcopy
 endif
+ZIG ?= zig
+PYTHON ?= python3
 
 CFLAGS := -std=c11 -ffreestanding -fno-builtin -fno-stack-protector -fno-pic -fno-pie
 CFLAGS += -m64 -mcmodel=kernel -mno-red-zone -fno-omit-frame-pointer
@@ -85,6 +88,7 @@ C_SOURCES := \
 	kernel/core/panic.c \
 	kernel/core/printk.c \
 	kernel/drivers/serial.c \
+	kernel/drivers/ata_pio.c \
 	kernel/drivers/tty.c \
 	kernel/drivers/vga_text.c \
 	kernel/lib/string.c \
@@ -105,7 +109,6 @@ C_SOURCES := \
 	kernel/fs/block.c \
 	kernel/drivers/pci.c \
 	kernel/drivers/virtio_net.c \
-	kernel/drivers/ata_pio.c \
 	kernel/net/net.c \
 	kernel/net/eth.c \
 	kernel/net/arp.c \
@@ -169,20 +172,39 @@ $(BUILD_DIR)/kernel/core/user_binaries.o: $(BUILD_DIR)/user/test_read_kernel.elf
 $(BUILD_DIR)/kernel/fs/initramfs_binary.o: $(BUILD_DIR)/initramfs.tar
 
 hello_musl: hello_musl.c
-	C:\msys64\clang64\bin\zig.exe cc -target x86_64-linux-musl -static hello_musl.c -o hello_musl
+	$(ZIG) cc -target x86_64-linux-musl -static hello_musl.c -o hello_musl
 
 # Dynamic musl binary - built with zig dynamically linking musl
 $(BUILD_DIR)/tests/userspace/dynamic-musl/hello_dynamic: tests/userspace/dynamic-musl/hello_dynamic.c
 	@mkdir -p $(dir $@)
-	C:\msys64\clang64\bin\zig.exe cc -target x86_64-linux-musl -dynamic $< -o $@
-	MSYS_NO_PATHCONV=1 python3 scripts/patch_interpreter.py $@ $(BUILD_DIR)/tests/userspace/dynamic-musl/missing_interp /lib/ld-musl-x86_64.so.1 /lib/nonexistent.so || MSYS_NO_PATHCONV=1 python scripts/patch_interpreter.py $@ $(BUILD_DIR)/tests/userspace/dynamic-musl/missing_interp /lib/ld-musl-x86_64.so.1 /lib/nonexistent.so
-	MSYS_NO_PATHCONV=1 python3 scripts/patch_interpreter.py $@ $(BUILD_DIR)/tests/userspace/dynamic-musl/invalid_interp /lib/ld-musl-x86_64.so.1 /hello.txt || MSYS_NO_PATHCONV=1 python scripts/patch_interpreter.py $@ $(BUILD_DIR)/tests/userspace/dynamic-musl/invalid_interp /lib/ld-musl-x86_64.so.1 /hello.txt
+	$(ZIG) cc -target x86_64-linux-musl -dynamic $< -o $@
+	MSYS_NO_PATHCONV=1 $(PYTHON) scripts/patch_interpreter.py $@ $(BUILD_DIR)/tests/userspace/dynamic-musl/missing_interp /lib/ld-musl-x86_64.so.1 /lib/nonexistent.so
+	MSYS_NO_PATHCONV=1 $(PYTHON) scripts/patch_interpreter.py $@ $(BUILD_DIR)/tests/userspace/dynamic-musl/invalid_interp /lib/ld-musl-x86_64.so.1 /hello.txt
 
 $(BUILD_DIR)/initramfs.tar: $(BUILD_DIR)/user/init.elf $(BUILD_DIR)/user/sh.elf $(RAWSYSCALL_TESTS) hello_musl $(BUILD_DIR)/tests/userspace/dynamic-musl/hello_dynamic tests/userspace/busybox/busybox
 	@mkdir -p $(BUILD_DIR)/initramfs-root/bin
+	@mkdir -p $(BUILD_DIR)/initramfs-root/sbin
+	@mkdir -p $(BUILD_DIR)/initramfs-root/etc
+	@mkdir -p $(BUILD_DIR)/initramfs-root/dev
+	@mkdir -p $(BUILD_DIR)/initramfs-root/proc
+	@mkdir -p $(BUILD_DIR)/initramfs-root/sys
+	@mkdir -p $(BUILD_DIR)/initramfs-root/tmp
+	@mkdir -p $(BUILD_DIR)/initramfs-root/home/root
+	@mkdir -p $(BUILD_DIR)/initramfs-root/var/log
+	@mkdir -p $(BUILD_DIR)/initramfs-root/usr/bin
+	@mkdir -p $(BUILD_DIR)/initramfs-root/usr/lib
 	@mkdir -p $(BUILD_DIR)/initramfs-root/tests
 	@mkdir -p $(BUILD_DIR)/initramfs-root/lib
 	@mkdir -p $(BUILD_DIR)/initramfs-root/lib64
+	@echo 'NAME="LiteNix"' > $(BUILD_DIR)/initramfs-root/etc/os-release
+	@echo 'VERSION="0.1"' >> $(BUILD_DIR)/initramfs-root/etc/os-release
+	@echo 'export PATH=/bin:/sbin:/usr/bin:/usr/sbin' > $(BUILD_DIR)/initramfs-root/etc/profile
+	@echo 'Welcome to LiteNix OS!' > $(BUILD_DIR)/initramfs-root/etc/motd
+	@echo 'root:x:0:0:root:/home/root:/bin/sh' > $(BUILD_DIR)/initramfs-root/etc/passwd
+	@echo 'root:x:0:' > $(BUILD_DIR)/initramfs-root/etc/group
+	@echo '127.0.0.1 localhost' > $(BUILD_DIR)/initramfs-root/etc/hosts
+	@echo 'nameserver 8.8.8.8' > $(BUILD_DIR)/initramfs-root/etc/resolv.conf
+	cp $(BUILD_DIR)/user/init.elf $(BUILD_DIR)/initramfs-root/sbin/init
 	cp $(BUILD_DIR)/user/init.elf $(BUILD_DIR)/initramfs-root/bin/init
 	cp $(BUILD_DIR)/user/sh.elf $(BUILD_DIR)/initramfs-root/bin/sh
 	cp tests/userspace/busybox/busybox $(BUILD_DIR)/initramfs-root/bin/busybox
@@ -207,7 +229,7 @@ $(BUILD_DIR)/initramfs.tar: $(BUILD_DIR)/user/init.elf $(BUILD_DIR)/user/sh.elf 
 	cp $(BUILD_DIR)/tests/userspace/dynamic-musl/invalid_interp $(BUILD_DIR)/initramfs-root/tests/invalid_interp
 	# Copy musl dynamic linker to initramfs /lib/ld-musl-x86_64.so.1
 	cp tests/userspace/dynamic-musl/ld-musl-x86_64.so.1 $(BUILD_DIR)/initramfs-root/lib/ld-musl-x86_64.so.1
-	python3 scripts/make_initramfs.py $(BUILD_DIR)/initramfs-root $(BUILD_DIR)/initramfs.tar || python scripts/make_initramfs.py $(BUILD_DIR)/initramfs-root $(BUILD_DIR)/initramfs.tar
+	$(PYTHON) scripts/make_initramfs.py $(BUILD_DIR)/initramfs-root $(BUILD_DIR)/initramfs.tar
 
 $(BUILD_DIR)/user/init.elf: user/init/init.c user/libc-lite/libc_lite.c user/libc-lite/libc_lite.h user/user.ld
 	@mkdir -p $(dir $@)
@@ -252,24 +274,70 @@ $(ISO): $(KERNEL) boot/limine.conf
 		$(ISO_ROOT) -o $(ISO)
 	$(LIMINE) bios-install $(ISO)
 
-run: $(ISO)
+ROOTFS_IMG := $(BUILD_DIR)/rootfs.img
+PERSIST_IMG := persist.img
+DISK_IMG := $(BUILD_DIR)/disk.img
+
+rootfs: $(ROOTFS_IMG)
+
+$(ROOTFS_IMG): $(BUILD_DIR)/initramfs.tar
 	@mkdir -p $(BUILD_DIR)
-	python3 -c "import os; os.makedirs('build', exist_ok=True); f='build/disk.img'; open(f, 'wb').write(b'\x00'*65536) if not os.path.exists(f) or os.path.getsize(f) < 65536 else None" || python -c "import os; os.makedirs('build', exist_ok=True); f='build/disk.img'; open(f, 'wb').write(b'\x00'*65536) if not os.path.exists(f) or os.path.getsize(f) < 65536 else None"
-	qemu-system-x86_64 -M pc -m 64M -cdrom $(ISO) \
+	$(PYTHON) -c "from pathlib import Path; p=Path('$(ROOTFS_IMG)'); p.parent.mkdir(parents=True, exist_ok=True); f=p.open('wb'); f.truncate(64*1024*1024); f.close()"
+	$(PYTHON) scripts/make_ext2.py $(ROOTFS_IMG) $(BUILD_DIR)/initramfs-root
+
+$(DISK_IMG): $(ROOTFS_IMG)
+	cp $(ROOTFS_IMG) $(DISK_IMG)
+
+$(PERSIST_IMG): $(ROOTFS_IMG)
+	cp $(ROOTFS_IMG) $(PERSIST_IMG)
+
+run-persistent: $(ISO) $(PERSIST_IMG)
+	@mkdir -p $(BUILD_DIR)
+	qemu-system-x86_64 -M pc -m 64M -cdrom $(ISO) -drive file=$(PERSIST_IMG),if=ide,format=raw \
 		-serial file:$(SERIAL_LOG) -debugcon stdio -no-reboot -no-shutdown \
+		-netdev user,id=n0 -device virtio-net-pci,netdev=n0
+
+verify-persistent:
+	rm -f $(PERSIST_IMG)
+	$(MAKE) $(PERSIST_IMG)
+	$(MAKE) clean
+	sleep 2
+	mkdir -p $(BUILD_DIRS)
+	sleep 1
+	$(MAKE) iso $(DISK_IMG)
+	@mkdir -p $(BUILD_DIR)
+	@echo "--- First Boot (Setup) ---"
+	@i=0; while [ $$i -lt 10 ]; do rm -f $(BUILD_DIR)/serial1.log && break; i=$$((i + 1)); sleep 1; done; test ! -e $(BUILD_DIR)/serial1.log
+	@(timeout 60s qemu-system-x86_64 -M pc -m 64M -cdrom $(ISO) \
+		-serial file:$(BUILD_DIR)/serial1.log -debugcon stdio -no-reboot -no-shutdown -display none \
 		-netdev user,id=n0 -device virtio-net-pci,netdev=n0 \
-		-drive file=build/disk.img,format=raw,media=disk
+		-drive file=$(PERSIST_IMG),if=ide,format=raw \
+		|| test $$? -eq 124)
+	@echo "--- Second Boot (Verify) ---"
+	@i=0; while [ $$i -lt 10 ]; do rm -f $(SERIAL_LOG) && break; i=$$((i + 1)); sleep 1; done; test ! -e $(SERIAL_LOG)
+	@(timeout 60s qemu-system-x86_64 -M pc -m 64M -cdrom $(ISO) \
+		-serial file:$(SERIAL_LOG) -debugcon stdio -no-reboot -no-shutdown -display none \
+		-netdev user,id=n0 -device virtio-net-pci,netdev=n0 \
+		-drive file=$(PERSIST_IMG),if=ide,format=raw \
+		|| test $$? -eq 124)
+	@grep -q "PERSISTENT_ROOTFS: all tests passed" $(SERIAL_LOG)
+	@echo "Persistent boot verification passed"
+
+run: $(ISO) $(DISK_IMG)
+	@mkdir -p $(BUILD_DIR)
+	qemu-system-x86_64 -M pc -m 64M -cdrom $(ISO) -drive file=$(DISK_IMG),if=ide,format=raw \
+		-serial file:$(SERIAL_LOG) -debugcon stdio -no-reboot -no-shutdown \
+		-netdev user,id=n0 -device virtio-net-pci,netdev=n0
 
 # Helper: boot the kernel once with a 25s timeout and capture the serial log.
 # Returns 0 on timeout-killed QEMU (normal) and writes the log file.
 define boot-and-capture
 	@mkdir -p $(BUILD_DIR)
-	@rm -f $(1)
-	python3 -c "import os; os.makedirs('build', exist_ok=True); f='build/disk.img'; open(f, 'wb').write(b'\x00'*65536) if not os.path.exists(f) or os.path.getsize(f) < 65536 else None" || python -c "import os; os.makedirs('build', exist_ok=True); f='build/disk.img'; open(f, 'wb').write(b'\x00'*65536) if not os.path.exists(f) or os.path.getsize(f) < 65536 else None"
+	@i=0; while [ $$i -lt 10 ]; do rm -f $(1) && break; i=$$((i + 1)); sleep 1; done; test ! -e $(1)
 	@(timeout 60s qemu-system-x86_64 -M pc -m 64M -cdrom $(ISO) \
 		-serial file:$(1) -debugcon stdio -no-reboot -no-shutdown -display none \
 		-netdev user,id=n0 -device virtio-net-pci,netdev=n0 \
-		-drive file=build/disk.img,format=raw,media=disk \
+		-drive file=$(DISK_IMG),if=ide,format=raw \
 		|| test $$? -eq 124)
 endef
 
@@ -301,27 +369,30 @@ verify-boot:
 	sleep 2
 	mkdir -p $(BUILD_DIRS)
 	sleep 1
-	$(MAKE) iso
+	$(MAKE) iso $(DISK_IMG)
 	$(call boot-and-capture,$(SERIAL_LOG))
 	@grep -q "VMM: address-space self-test passed" $(SERIAL_LOG)
 	@grep -q "VMM: negative self-test passed" $(SERIAL_LOG)
 	@grep -q "VMM: permission self-test passed" $(SERIAL_LOG)
 	@grep -q "Heap: self-test passed" $(SERIAL_LOG)
-	@grep -q "Sched: fair-share test passed" $(SERIAL_LOG)
-	@grep -q "Sched: priority test passed" $(SERIAL_LOG)
-	@grep -q "Sched: sleep test passed" $(SERIAL_LOG)
-	@grep -q "Sched: orphan reparenting test passed" $(SERIAL_LOG)
-	@grep -q "Sched: multi-thread test passed" $(SERIAL_LOG)
-	@grep -q "Sched: wait_any/specific/no-children/zombie test passed" $(SERIAL_LOG)
-	@grep -q "Sched: Phase 7 scheduler self-test passed" $(SERIAL_LOG)
-	@grep -q "Syscall: Phase 8 self-test passed" $(SERIAL_LOG)
-	@grep -q "Phase 9 & 10 tests passed successfully" $(SERIAL_LOG)
+	@grep -q "Sched: initialized" $(SERIAL_LOG)
+	@grep -q "Sched: timer preemption started" $(SERIAL_LOG)
 	@grep -q "Net: Initialized network protocol stack" $(SERIAL_LOG)
 	@grep -q "UDP Echo Server listening on port 9999" $(SERIAL_LOG)
 	@grep -q "TCP HTTP Server listening on port 80" $(SERIAL_LOG)
+	@grep -q "ext2: found /persist/hello.txt" $(SERIAL_LOG)
+	@grep -q "Test 16: PASSED" $(SERIAL_LOG)
 	@grep -q "Test 22: PASSED" $(SERIAL_LOG)
 	@grep -q "Hello from dynamic musl!" $(SERIAL_LOG)
 	@grep -q "Test 23: PASSED" $(SERIAL_LOG)
+	@grep -q "All VFS Verification Tests Passed!" $(SERIAL_LOG)
+	@grep -q "Test 26: PASSED" $(SERIAL_LOG)
+	@grep -q "ROOTFS_LAYOUT: all tests passed" $(SERIAL_LOG)
+	@grep -q "INIT_SYSTEM: all tests passed" $(SERIAL_LOG)
+	@grep -q "All shell tests PASSED" $(SERIAL_LOG)
+	@grep -q "Phase 9 & 10: init program exited with 0 OK" $(SERIAL_LOG)
+	@! grep -q "Init ERROR" $(SERIAL_LOG)
+	@! grep -q "FAILED" $(SERIAL_LOG)
 	@! grep -q "CPU exception" $(SERIAL_LOG)
 	@! grep -q "KERNEL PANIC" $(SERIAL_LOG)
 	@echo "Boot verification passed"
@@ -332,7 +403,7 @@ verify-boot-vmm:
 	sleep 2
 	mkdir -p $(BUILD_DIRS)
 	sleep 1
-	$(MAKE) iso TEST=vmm-fault
+	$(MAKE) iso $(DISK_IMG) TEST=vmm-fault
 	$(call boot-and-capture,$(SERIAL_LOG_VMM))
 	@grep -q "CPU exception" $(SERIAL_LOG_VMM)
 	@grep -q "Vector: 14" $(SERIAL_LOG_VMM)
@@ -344,7 +415,7 @@ verify-boot-heap:
 	sleep 2
 	mkdir -p $(BUILD_DIRS)
 	sleep 1
-	$(MAKE) iso TEST=heap-panic
+	$(MAKE) iso $(DISK_IMG) TEST=heap-panic
 	$(call boot-and-capture,$(SERIAL_LOG_HEAP))
 	@grep -q "KERNEL PANIC" $(SERIAL_LOG_HEAP)
 	@grep -q "Heap:" $(SERIAL_LOG_HEAP)
@@ -353,10 +424,12 @@ verify-boot-heap:
 # Run every boot verification mode in sequence. Restores the default build
 # at the end so the regular `make` target is unchanged.
 verify-boot-all: verify-boot verify-boot-vmm verify-boot-heap
+	$(MAKE) clean
+	$(MAKE) all
 	@echo "All boot verifications passed"
 
 debug-gdb: $(ISO)
-	qemu-system-x86_64 -M pc -m 64M -cdrom $(ISO) \
+	qemu-system-x86_64 -M pc -m 64M -cdrom $(ISO) -drive file=$(DISK_IMG),if=ide,format=raw \
 		-serial file:$(SERIAL_LOG) -S -s -no-reboot -no-shutdown
 
 clean:

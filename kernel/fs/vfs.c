@@ -1,4 +1,5 @@
 #include <fs/vfs.h>
+#include <fs/block.h>
 #include <mm/heap.h>
 #include <lib/string.h>
 #include <drivers/serial.h>
@@ -75,6 +76,53 @@ static int console_write(struct vfs_node *node, size_t offset, const void *buf, 
     (void)node; (void)offset;
     extern int tty_driver_write(const void *buf, size_t count);
     return tty_driver_write(buf, count);
+}
+
+static int block_dev_read(struct vfs_node *node, size_t offset, void *buf, size_t count)
+{
+    struct block_device *dev = (struct block_device *)node->data;
+    if (dev == 0 || dev->read_blocks == 0) return -EIO;
+
+    // Convert offset/count to blocks
+    if (offset % dev->sector_size != 0) return -EINVAL;
+    if (count % dev->sector_size != 0) return -EINVAL;
+
+    uint64_t lba = offset / dev->sector_size;
+    uint32_t bcount = (uint32_t)(count / dev->sector_size);
+
+    int r = dev->read_blocks(dev, lba, bcount, buf);
+    if (r < 0) return r;
+    return (int)count;
+}
+
+static int block_dev_write(struct vfs_node *node, size_t offset, const void *buf, size_t count)
+{
+    struct block_device *dev = (struct block_device *)node->data;
+    if (dev == 0 || dev->write_blocks == 0) return -EIO;
+
+    if (offset % dev->sector_size != 0) return -EINVAL;
+    if (count % dev->sector_size != 0) return -EINVAL;
+
+    uint64_t lba = offset / dev->sector_size;
+    uint32_t bcount = (uint32_t)(count / dev->sector_size);
+
+    int r = dev->write_blocks(dev, lba, bcount, buf);
+    if (r < 0) return r;
+    return (int)count;
+}
+
+#include <fs/block.h>
+void vfs_register_block_device(struct block_device *dev)
+{
+    char path[64];
+    strcpy(path, "/dev/");
+    strcat(path, dev->name);
+    vfs_create_device(path, block_dev_read, block_dev_write);
+    struct vfs_node *node = vfs_lookup(path);
+    if (node) {
+        node->data = dev;
+        node->size = dev->sector_count * dev->sector_size;
+    }
 }
 
 // PRNG state for /dev/random and /dev/urandom
@@ -466,6 +514,38 @@ static int proc_dir_readdir(struct vfs_node *node, size_t index, struct vfs_dire
 
 void ext2_init(void);
 
+static struct vfs_node *find_parent_of(const char *path, char *basename_out, size_t basename_sz)
+{
+    /* Split path into directory part and basename */
+    if (path == 0 || path[0] != '/') return 0;
+
+    /* Find last '/' */
+    size_t len = strlen(path);
+    size_t last_slash = 0;
+    for (size_t i = 0; i < len; i++) {
+        if (path[i] == '/') last_slash = i;
+    }
+
+    /* Basename */
+    const char *base = path + last_slash + 1;
+    size_t blen = strlen(base);
+    if (blen == 0 || blen >= basename_sz) return 0;
+    memcpy(basename_out, base, blen + 1);
+
+    /* Parent path */
+    if (last_slash == 0) {
+        /* Parent is root */
+        return root_node;
+    }
+
+    char parent_path[512];
+    if (last_slash >= sizeof(parent_path)) return 0;
+    memcpy(parent_path, path, last_slash);
+    parent_path[last_slash] = '\0';
+
+    return vfs_lookup(parent_path);
+}
+
 void vfs_init(void)
 {
     root_node = kzalloc(sizeof(struct vfs_node));
@@ -524,13 +604,6 @@ void vfs_init(void)
 
     // Phase 23: Create /tmp directory (acting as tmpfs)
     vfs_create_file("/tmp", VFS_TYPE_DIR, 0, 0);
-
-    // Initialize ATA PIO driver
-    extern void ata_init(void);
-    ata_init();
-
-    // Initialize ext2 filesystem
-    ext2_init();
 }
 
 struct vfs_node *vfs_get_root(void)
@@ -766,6 +839,15 @@ struct vfs_node *vfs_create_file(const char *path, uint32_t type, size_t size, c
             }
             current = found_node;
         } else {
+            if (is_last && current->create != 0) {
+                struct vfs_node *new_node = 0;
+                int r = current->create(current, component, S_IFREG | 0644, &new_node);
+                if (r == 0 && new_node != 0) {
+                    return new_node;
+                }
+                return 0;
+            }
+
             struct vfs_node *new_node = kzalloc(sizeof(struct vfs_node));
             if (new_node == 0) return 0;
 
@@ -852,6 +934,12 @@ int vfs_mkdir(const char *path)
     struct vfs_node *existing = vfs_lookup(path);
     if (existing != 0) return -EEXIST;
 
+    char basename[128];
+    struct vfs_node *parent = find_parent_of(path, basename, sizeof(basename));
+    if (parent != 0 && parent->mkdir != 0) {
+        return parent->mkdir(parent, basename, S_IFDIR | 0755);
+    }
+
     struct vfs_node *node = vfs_create_file(path, VFS_TYPE_DIR, 0, 0);
     if (node == 0) return -ENOMEM;
     node->mode = S_IFDIR | 0755;
@@ -862,38 +950,6 @@ int vfs_mkdir(const char *path)
 /* vfs_unlink — remove a file node from the tree                       */
 /* ------------------------------------------------------------------ */
 
-static struct vfs_node *find_parent_of(const char *path, char *basename_out, size_t basename_sz)
-{
-    /* Split path into directory part and basename */
-    if (path == 0 || path[0] != '/') return 0;
-
-    /* Find last '/' */
-    size_t len = strlen(path);
-    size_t last_slash = 0;
-    for (size_t i = 0; i < len; i++) {
-        if (path[i] == '/') last_slash = i;
-    }
-
-    /* Basename */
-    const char *base = path + last_slash + 1;
-    size_t blen = strlen(base);
-    if (blen == 0 || blen >= basename_sz) return 0;
-    memcpy(basename_out, base, blen + 1);
-
-    /* Parent path */
-    if (last_slash == 0) {
-        /* Parent is root */
-        return root_node;
-    }
-
-    char parent_path[512];
-    if (last_slash >= sizeof(parent_path)) return 0;
-    memcpy(parent_path, path, last_slash);
-    parent_path[last_slash] = '\0';
-
-    return vfs_lookup(parent_path);
-}
-
 int vfs_unlink(const char *path)
 {
     if (path == 0 || path[0] != '/') return -EINVAL;
@@ -901,6 +957,12 @@ int vfs_unlink(const char *path)
     char basename[128];
     struct vfs_node *parent = find_parent_of(path, basename, sizeof(basename));
     if (parent == 0) return -ENOENT;
+
+    /* Call filesystem specific unlink if present */
+    if (parent->unlink != 0) {
+        int r = parent->unlink(parent, basename);
+        if (r != 0) return r;
+    }
 
     /* Find node in parent's children list */
     struct vfs_node *prev = 0;
@@ -949,6 +1011,11 @@ int vfs_rename(const char *oldpath, const char *newpath)
     struct vfs_node *new_parent = find_parent_of(newpath, new_basename, sizeof(new_basename));
     if (new_parent == 0) return -ENOENT;
 
+    if (old_parent->rename != 0) {
+        int r = old_parent->rename(old_parent, old_basename, new_parent, new_basename);
+        if (r != 0) return r;
+    }
+
     /* Find node */
     struct vfs_node *prev = 0;
     struct vfs_node *node = old_parent->children;
@@ -990,14 +1057,12 @@ int vfs_truncate(struct vfs_node *node, size_t new_size)
     if (node == 0) return -EINVAL;
     if (node->type != VFS_TYPE_FILE) return -EINVAL;
 
-    extern int ext2_file_write(struct vfs_node *node, size_t offset, const void *buf, size_t count);
-    if (node->write == ext2_file_write) {
-        extern int ext2_truncate(struct vfs_node *node, size_t new_size);
-        return ext2_truncate(node, new_size);
+    if (node->truncate != 0) {
+        return node->truncate(node, new_size);
     }
 
     if (new_size == 0) {
-        if (node->data != 0) {
+        if (node->data != 0 && node->write == 0) {
             kfree(node->data);
             node->data = 0;
         }
@@ -1005,17 +1070,21 @@ int vfs_truncate(struct vfs_node *node, size_t new_size)
         return 0;
     }
 
-    void *new_data = krealloc(node->data, new_size);
-    if (new_data == 0) return -ENOMEM;
+    /* Fallback for simple memory-backed nodes */
+    if (node->write == 0) {
+        void *new_data = krealloc(node->data, new_size);
+        if (new_data == 0) return -ENOMEM;
 
-    /* Zero-fill extension */
-    if (new_size > node->size) {
-        memset((uint8_t *)new_data + node->size, 0, new_size - node->size);
+        /* Zero-fill extension */
+        if (new_size > node->size) {
+            memset((uint8_t *)new_data + node->size, 0, new_size - node->size);
+        }
+        node->data = new_data;
+        node->size = new_size;
+        return 0;
     }
 
-    node->data = new_data;
-    node->size = new_size;
-    return 0;
+    return -ENOTSUP;
 }
 
 void file_close(struct file *f)

@@ -27,5 +27,8 @@ if [ $RC -ne 0 ]; then
     exit $RC
 fi
 
+echo "[ci-boot] restoring default build"
+make clean all
+
 echo "[ci-boot] all boot verifications passed at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 exit 0

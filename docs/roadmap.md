@@ -220,10 +220,9 @@ reaps zombies.
 - `rt_sigaction` stub
 - `rt_sigprocmask`
 - signal delivery before userspace return
-- handlers later
+- handlers implemented and verified
 
-Acceptance: invalid memory access sends SIGSEGV, parent receives SIGCHLD, and
-SIGINT works later for foreground processes.
+Acceptance: invalid memory access sends SIGSEGV, parent receives SIGCHLD, and SIGINT works for foreground processes. Handlers verified in `init.c` Test 25.
 
 ## Phase 17: Futexes And Threading
 
@@ -253,7 +252,7 @@ process exit is clean.
 Acceptance: `malloc` works in a static musl program, anonymous `mmap` works,
 invalid memory faults, and sparse mappings are lazy.
 
-**Phase 19: File-Backed Mmap (Milestone 2)**
+**Phase 18A: File-Backed Mmap (Milestone 2)**
 
 - file-backed `mmap` with MAP_PRIVATE
 - COW page fault loading from file inode
@@ -286,8 +285,7 @@ evidence.
 - builtins such as `cd`, `pwd`, `echo`, `cat`, and `ls`
 - init mounts filesystems and starts shell
 
-Acceptance: the OS boots into a shell, runs `/bin/hello` and `/bin/ls`, and
-recovers after a child crash.
+Acceptance: the OS boots into a shell, runs `/bin/hello` and `/bin/ls`, and recovers after a child crash. Verified by BusyBox shell integration.
 
 ## Phase 21: Pipes, Poll, Select, Epoll
 
@@ -321,12 +319,11 @@ sleep/wakeup works.
 - tmpfs next
 - ext2 read-only
 - ext2 read/write
-- virtio-blk
-- simple block cache
+- virtio-blk (in progress)
+- simple block cache (partial)
 - page cache later
 
-Acceptance: initramfs mounts as root, tmpfs mounts on `/tmp`, ext2 images can
-be read, and simple ext2 writes work later.
+Acceptance: initramfs mounts as root, tmpfs mounts on `/tmp`, ext2 images can be read, and simple ext2 writes work (Verified by `init.c` Test 26/27/28).
 
 ## Phase 24: Networking Later
 
