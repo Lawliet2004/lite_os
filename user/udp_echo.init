@@ -1,0 +1,29 @@
+#!/bin/sh
+
+PIDFILE="/run/udp_echo.pid"
+PROG="/usr/sbin/udp_echo"
+
+case "$1" in
+    start)
+        echo "Starting udp_echo..."
+        $PROG &
+        # In a real system we'd use start-stop-daemon
+        # Here we just assume it started
+        touch $PIDFILE
+        ;;
+    stop)
+        echo "Stopping udp_echo..."
+        rm -f $PIDFILE
+        ;;
+    status)
+        if [ -f "$PIDFILE" ]; then
+            echo "udp_echo is running"
+        else
+            echo "udp_echo is stopped"
+        fi
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|status}"
+        exit 1
+        ;;
+esac

@@ -5,7 +5,7 @@
 LiteNix implements the Linux x86_64 syscall ABI via SYSCALL/SYSRET (EFER/STAR/LSTAR/SFMASK MSRs).
 Unknown syscalls return `-ENOSYS`. Invalid user pointers return `-EFAULT`. The negative errno convention is followed throughout.
 
-Last full verification: `make verify-boot` PASS (2026-06-10).
+Last full verification: `make verify-boot` PASS (2026-06-10). The event-waiting slice was updated on 2026-06-11 and still needs a fresh boot run.
 
 ## Implemented and Verified Syscalls
 
@@ -113,6 +113,11 @@ Last full verification: `make verify-boot` PASS (2026-06-10).
 | 7 | `poll` | Full |
 | 22 | `pipe` | Full |
 | 293 | `pipe2` | Redirects to `pipe` + flags |
+| 23 | `select` | Event-queue-backed readiness path added; boot verification pending |
+| 270 | `pselect6` | Event-queue-backed readiness path plus temporary signal mask; boot verification pending |
+| 291 | `epoll_create1` | Full |
+| 233 | `epoll_ctl` | Full |
+| 232 | `epoll_wait` | Event-queue-backed readiness path added; boot verification pending |
 
 ### Sockets
 | # | Name | Notes |
@@ -133,16 +138,20 @@ Last full verification: `make verify-boot` PASS (2026-06-10).
 |---|------|-------|
 | 16 | `ioctl` | TCGETS / TCSETS / TIOCGWINSZ stubs |
 
-## Stubs (Safe, Return errno)
-- `madvise` → `-ENOSYS` (programs tolerate this)
-- `mremap` → `-ENOSYS`
-- `prctl` → partial (PR_SET_NAME stored, others `-EINVAL`)
-- `epoll_create1` → `-ENOSYS`
-- `epoll_ctl` → `-ENOSYS`
-- `epoll_wait` → `-ENOSYS`
-- `sendmsg` → `-ENOSYS`
-- `recvmsg` → `-ENOSYS`
-- `socketpair` → `-ENOSYS`
+## Notes
+
+The following syscalls now have updated kernel paths and matching tests, but
+the new event-waiting behavior still needs a fresh boot verification run:
+
+- `select` / `pselect6`
+- `epoll_create1` / `epoll_ctl` / `epoll_wait`
+- `sendmsg` / `recvmsg`
+- `socketpair`
+- `mremap`
+- `madvise`
+- `prctl`
+- `getresuid` / `setresuid`
+- `getresgid` / `setresgid`
 
 ## Argument Validation Rules
 1. Every syscall validates user pointer arguments with `copy_from_user` / `copy_to_user` before touching userspace memory.
@@ -154,10 +163,10 @@ Last full verification: `make verify-boot` PASS (2026-06-10).
 
 ## Next Syscalls to Add
 In priority order for PHASE 3 (TTY/Signals) and PHASE 4 (syscall compat):
-1. `select` / `pselect6` — needed by some musl programs
-2. `epoll_create1` / `epoll_ctl` / `epoll_wait` — needed by heavier daemons
-3. `sendmsg` / `recvmsg` — needed for Unix sockets / DNS
-4. `getcwd` — needed by shell `pwd`
-5. `chdir` — needed by shell `cd`
-6. `getresuid` / `getresgid` — needed by some login/permission tools
-7. `setuid` / `setgid` — needed for PHASE 7 users/permissions
+1. `sigaltstack` — needed for robust signal-heavy runtimes
+2. `tgkill` / `tkill` — needed for thread-directed signal delivery
+3. `timerfd_create` / `timerfd_settime` / `timerfd_gettime` — useful for event loops
+4. `eventfd` / `eventfd2` — useful for synchronization primitives
+5. `inotify` minimal support — used by tooling that watches filesystem changes
+6. `clone3` only if a target binary requires it
+7. `setuid` / `setgid` / `setgroups` — needed for the user/permission model

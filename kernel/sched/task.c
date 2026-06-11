@@ -40,6 +40,8 @@ struct process *process_create_with_parent(struct process *parent)
     process->umask = 022;
     process->pgid = process->pid;
     process->sid = process->pid;
+    process->ruid = 0; process->euid = 0; process->suid = 0;
+    process->rgid = 0; process->egid = 0; process->sgid = 0;
 
     /* Default cwd to root */
     process->cwd[0] = '/';
@@ -57,6 +59,8 @@ struct process *process_create_with_parent(struct process *parent)
             process->pgid = parent->pgid;
             process->sid = parent->sid;
         }
+        process->ruid = parent->ruid; process->euid = parent->euid; process->suid = parent->suid;
+        process->rgid = parent->rgid; process->egid = parent->egid; process->sgid = parent->sgid;
         for (int i = 0; i < 64; i++) {
             process->sigactions[i] = parent->sigactions[i];
         }
@@ -191,6 +195,7 @@ static struct task *task_alloc(const char *name, struct process *process,
     task->time_slice = task->time_slice_max;
     task->total_ticks = 0;
     task->sleep_until = 0;
+    task->sleep_timed_out = false;
     task->flags = 0;
     task->sleep_next = 0;
 
@@ -330,6 +335,7 @@ void task_kill(struct task *task)
         sched_remove_sleeper(task);
         task->sleep_until = 0;
     }
+    task->sleep_timed_out = false;
 
     task->state = TASK_ZOMBIE;
     task->exit_code = -1;
@@ -417,6 +423,7 @@ void task_sleep_ticks(uint64_t ticks)
 
     current_task->sleep_until = pit_ticks() + ticks;
     current_task->state = TASK_SLEEPING;
+    current_task->sleep_timed_out = false;
 
     /*
      * Task stays in the runqueue — pick_next_task skips non-READY tasks.
@@ -430,6 +437,7 @@ void task_sleep_ticks(uint64_t ticks)
     /* After wakeup */
     current_task->sleep_until = 0;
     current_task->sleep_next = 0;
+    current_task->sleep_timed_out = false;
 
     if (was_enabled) {
         interrupts_enable();
@@ -738,6 +746,7 @@ struct task *task_fork(struct syscall_frame *parent_frame)
     child_task->time_slice = child_task->time_slice_max;
     child_task->total_ticks = 0;
     child_task->sleep_until = 0;
+    child_task->sleep_timed_out = false;
     child_task->flags = parent_task->flags & ~TASK_FLAG_IDLE;
     child_task->sleep_next = 0;
     child_task->signal_blocked = parent_task->signal_blocked;
@@ -816,6 +825,7 @@ struct task *task_clone_thread(struct syscall_frame *parent_frame, uint64_t flag
     child_task->time_slice = child_task->time_slice_max;
     child_task->total_ticks = 0;
     child_task->sleep_until = 0;
+    child_task->sleep_timed_out = false;
     child_task->flags = parent_task->flags & ~TASK_FLAG_IDLE;
     child_task->sleep_next = 0;
     child_task->signal_blocked = parent_task->signal_blocked;
@@ -892,6 +902,11 @@ void task_send_signal(struct task *task, int sig)
                 task->wait_next = 0;
                 task->wait_queue = 0;
             }
+            if (task->sleep_until != 0) {
+                sched_remove_sleeper(task);
+                task->sleep_until = 0;
+            }
+            task->sleep_timed_out = false;
             task->state = TASK_READY;
             sched_add_task(task);
         }

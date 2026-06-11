@@ -40,6 +40,28 @@ static int default_file_write(struct vfs_node *node, size_t offset, const void *
     return (int)count;
 }
 
+static int default_file_poll(struct vfs_node *node, short events, short *revents)
+{
+    (void)node;
+    short ready = 0;
+    if (events & 0x0001) {
+        ready |= 0x0001;
+    }
+    if (events & 0x0004) {
+        ready |= 0x0004;
+    }
+    if (events & 0x0008) {
+        ready |= 0x0008;
+    }
+    if (events & 0x0010) {
+        ready |= 0x0010;
+    }
+    if (revents != 0) {
+        *revents = ready;
+    }
+    return ready != 0 ? 1 : 0;
+}
+
 static int default_dir_readdir(struct vfs_node *node, size_t index, struct vfs_dirent *dirent)
 {
     struct vfs_node *child = node->children;
@@ -76,6 +98,29 @@ static int console_write(struct vfs_node *node, size_t offset, const void *buf, 
     (void)node; (void)offset;
     extern int tty_driver_write(const void *buf, size_t count);
     return tty_driver_write(buf, count);
+}
+
+static int tty_poll(struct vfs_node *node, short events, short *revents)
+{
+    (void)node;
+    short ready = 0;
+    extern bool tty_has_input(void);
+    if ((events & 0x0001) && tty_has_input()) {
+        ready |= 0x0001;
+    }
+    if (events & 0x0004) {
+        ready |= 0x0004;
+    }
+    if (events & 0x0008) {
+        ready |= 0x0008;
+    }
+    if (events & 0x0010) {
+        ready |= 0x0010;
+    }
+    if (revents != 0) {
+        *revents = ready;
+    }
+    return ready != 0 ? 1 : 0;
 }
 
 static int block_dev_read(struct vfs_node *node, size_t offset, void *buf, size_t count)
@@ -379,6 +424,137 @@ static int proc_stat_read(struct vfs_node *node, size_t offset, void *buf, size_
     return (int)copy;
 }
 
+static void append_dec(char *buf, uint8_t val)
+{
+    char d[4];
+    int idx = 0;
+    if (val == 0) {
+        d[idx++] = '0';
+    } else {
+        while (val > 0) {
+            d[idx++] = '0' + (val % 10);
+            val /= 10;
+        }
+    }
+    // Reverse
+    for (int j = 0; j < idx / 2; j++) {
+        char temp = d[j];
+        d[j] = d[idx - 1 - j];
+        d[idx - 1 - j] = temp;
+    }
+    d[idx] = '\0';
+    strcat(buf, d);
+}
+
+static void append_hex(char *buf, uint8_t val)
+{
+    const char *digits = "0123456789abcdef";
+    char h[3] = { digits[val >> 4], digits[val & 0xf], '\0' };
+    strcat(buf, h);
+}
+
+static void append_ip(char *buf, const uint8_t *ip_addr)
+{
+    for (int i = 0; i < 4; i++) {
+        append_dec(buf, ip_addr[i]);
+        if (i < 3) strcat(buf, ".");
+    }
+}
+
+static void format_ip_string(char *buf, const uint8_t *mac, const uint8_t *ip, const uint8_t *mask, const uint8_t *gw)
+{
+    strcpy(buf, "device: eth0\nmac: ");
+    for (int i = 0; i < 6; i++) {
+        append_hex(buf, mac[i]);
+        if (i < 5) strcat(buf, ":");
+    }
+    strcat(buf, "\nip: ");
+    append_ip(buf, ip);
+    strcat(buf, "\nmask: ");
+    append_ip(buf, mask);
+    strcat(buf, "\ngw: ");
+    append_ip(buf, gw);
+    strcat(buf, "\n");
+}
+
+static int proc_net_config_read(struct vfs_node *node, size_t offset, void *buf, size_t count)
+{
+    (void)node;
+    extern uint8_t my_ip[4];
+    extern uint8_t my_gateway[4];
+    extern uint8_t my_mask[4];
+    extern uint8_t my_mac[6];
+
+    char msg[256];
+    format_ip_string(msg, my_mac, my_ip, my_mask, my_gateway);
+
+    size_t len = strlen(msg);
+    if (offset >= len) return 0;
+    size_t avail = len - offset;
+    size_t copy = count < avail ? count : avail;
+    memcpy(buf, msg + offset, copy);
+    return (int)copy;
+}
+
+static bool parse_ip_bytes(const char *str, uint8_t *out)
+{
+    int val = 0;
+    const char *p = str;
+    for (int i = 0; i < 4; i++) {
+        val = 0;
+        // Skip any spaces or dots if first is dot (which is error)
+        if (*p < '0' || *p > '9') return false;
+        while (*p >= '0' && *p <= '9') {
+            val = val * 10 + (*p - '0');
+            p++;
+        }
+        if (val > 255) return false;
+        out[i] = (uint8_t)val;
+        if (i < 3) {
+            if (*p != '.') return false;
+            p++;
+        }
+    }
+    return true;
+}
+
+static int proc_net_config_write(struct vfs_node *node, size_t offset, const void *buf, size_t count)
+{
+    (void)node; (void)offset;
+    extern uint8_t my_ip[4];
+    extern uint8_t my_gateway[4];
+    extern uint8_t my_mask[4];
+
+    char temp[128];
+    size_t len = count < 127 ? count : 127;
+    memcpy(temp, buf, len);
+    temp[len] = '\0';
+
+    char *line = temp;
+    while (*line != '\0') {
+        while (*line == ' ' || *line == '\t' || *line == '\n' || *line == '\r') line++;
+        if (*line == '\0') break;
+
+        char *next_line = line;
+        while (*next_line != '\n' && *next_line != '\0') next_line++;
+        bool last = (*next_line == '\0');
+        *next_line = '\0';
+
+        if (memcmp(line, "ip ", 3) == 0) {
+            parse_ip_bytes(line + 3, my_ip);
+        } else if (memcmp(line, "mask ", 5) == 0) {
+            parse_ip_bytes(line + 5, my_mask);
+        } else if (memcmp(line, "gw ", 3) == 0) {
+            parse_ip_bytes(line + 3, my_gateway);
+        }
+
+        if (last) break;
+        line = next_line + 1;
+    }
+
+    return (int)count;
+}
+
 static int proc_self_status_read(struct vfs_node *node, size_t offset, void *buf, size_t count)
 {
     (void)node;
@@ -546,22 +722,17 @@ static struct vfs_node *find_parent_of(const char *path, char *basename_out, siz
     return vfs_lookup(parent_path);
 }
 
-void vfs_init(void)
+void vfs_setup_pseudo_filesystems(void)
 {
-    root_node = kzalloc(sizeof(struct vfs_node));
-    if (root_node == 0) {
-        panic("VFS: Failed to allocate root node");
-    }
-    strcpy(root_node->name, "/");
-    root_node->type = VFS_TYPE_DIR;
-    root_node->inode_num = next_inode++;
-    root_node->readdir = default_dir_readdir;
-
     // Create /dev directory
     vfs_create_file("/dev", VFS_TYPE_DIR, 0, 0);
 
     // Create /dev/console
     vfs_create_device("/dev/console", console_read, console_write);
+    struct vfs_node *console_node = vfs_lookup("/dev/console");
+    if (console_node != 0) {
+        console_node->poll = tty_poll;
+    }
 
     // Create /dev/null
     vfs_create_device("/dev/null", null_read, null_write);
@@ -578,6 +749,10 @@ void vfs_init(void)
 
     // Create /dev/tty
     vfs_create_device("/dev/tty", tty_read, tty_write);
+    struct vfs_node *tty_node = vfs_lookup("/dev/tty");
+    if (tty_node != 0) {
+        tty_node->poll = tty_poll;
+    }
 
     // Create /dev/kmsg
     vfs_create_device("/dev/kmsg", kmsg_read, kmsg_write);
@@ -598,12 +773,49 @@ void vfs_init(void)
     vfs_create_device("/proc/uptime", proc_uptime_read, 0);
     vfs_create_device("/proc/stat", proc_stat_read, 0);
 
+    // Create /proc/net directory and config device
+    vfs_create_file("/proc/net", VFS_TYPE_DIR, 0, 0);
+    vfs_create_device("/proc/net/config", proc_net_config_read, proc_net_config_write);
+
     // Create /proc/self directory and status
     vfs_create_file("/proc/self", VFS_TYPE_DIR, 0, 0);
     vfs_create_device("/proc/self/status", proc_self_status_read, 0);
 
     // Phase 23: Create /tmp directory (acting as tmpfs)
     vfs_create_file("/tmp", VFS_TYPE_DIR, 0, 0);
+
+    // Create /run directory
+    vfs_create_file("/run", VFS_TYPE_DIR, 0, 0);
+}
+
+void vfs_clear_node_children(struct vfs_node *node)
+{
+    if (!node) return;
+    struct vfs_node *child = node->children;
+    while (child != 0) {
+        struct vfs_node *next = child->next;
+        vfs_clear_node_children(child);
+        if (child->type == VFS_TYPE_FILE && child->data != 0) {
+            kfree(child->data);
+        }
+        kfree(child);
+        child = next;
+    }
+    node->children = 0;
+}
+
+void vfs_init(void)
+{
+    root_node = kzalloc(sizeof(struct vfs_node));
+    if (root_node == 0) {
+        panic("VFS: Failed to allocate root node");
+    }
+    strcpy(root_node->name, "/");
+    root_node->type = VFS_TYPE_DIR;
+    root_node->inode_num = next_inode++;
+    root_node->readdir = default_dir_readdir;
+
+    vfs_setup_pseudo_filesystems();
 }
 
 struct vfs_node *vfs_get_root(void)
@@ -837,9 +1049,16 @@ struct vfs_node *vfs_create_file(const char *path, uint32_t type, size_t size, c
             if (is_last) {
                 return found_node;
             }
-            current = found_node;
+            if (found_node->type == VFS_TYPE_LINK) {
+                int err = 0;
+                struct vfs_node *resolved = vfs_resolve_path_rec(current, (const char *)found_node->data, true, 0, &err);
+                if (resolved == 0) return 0;
+                current = resolved;
+            } else {
+                current = found_node;
+            }
         } else {
-            if (is_last && current->create != 0) {
+            if (is_last && type != VFS_TYPE_LINK && current->create != 0) {
                 struct vfs_node *new_node = 0;
                 int r = current->create(current, component, S_IFREG | 0644, &new_node);
                 if (r == 0 && new_node != 0) {
@@ -862,6 +1081,7 @@ struct vfs_node *vfs_create_file(const char *path, uint32_t type, size_t size, c
                     if (type == VFS_TYPE_FILE) {
                         new_node->read = default_file_read;
                         new_node->write = default_file_write;
+                        new_node->poll = default_file_poll;
                     }
                     if (size > 0 && data != 0) {
                         new_node->data = kmalloc(size);
@@ -897,6 +1117,7 @@ struct vfs_node *vfs_create_device(const char *path, vfs_read_t read, vfs_write_
     if (node != 0) {
         node->read = read;
         node->write = write;
+        node->poll = default_file_poll;
         node->mode = S_IFCHR | 0666;
     }
     return node;
@@ -926,23 +1147,24 @@ struct vfs_node *vfs_lookup_at(const char *cwd, const char *path)
 /* vfs_mkdir                                                            */
 /* ------------------------------------------------------------------ */
 
-int vfs_mkdir(const char *path)
+int vfs_mkdir(const char *path, uint32_t mode)
 {
     if (path == 0 || path[0] != '/') return -EINVAL;
 
     /* Check it doesn't already exist */
-    struct vfs_node *existing = vfs_lookup(path);
+    int lookup_err = 0;
+    struct vfs_node *existing = vfs_resolve_path_at(root_node, path, false, &lookup_err);
     if (existing != 0) return -EEXIST;
 
     char basename[128];
     struct vfs_node *parent = find_parent_of(path, basename, sizeof(basename));
     if (parent != 0 && parent->mkdir != 0) {
-        return parent->mkdir(parent, basename, S_IFDIR | 0755);
+        return parent->mkdir(parent, basename, mode);
     }
 
     struct vfs_node *node = vfs_create_file(path, VFS_TYPE_DIR, 0, 0);
     if (node == 0) return -ENOMEM;
-    node->mode = S_IFDIR | 0755;
+    node->mode = S_IFDIR | (mode & 07777);
     return 0;
 }
 
@@ -958,13 +1180,7 @@ int vfs_unlink(const char *path)
     struct vfs_node *parent = find_parent_of(path, basename, sizeof(basename));
     if (parent == 0) return -ENOENT;
 
-    /* Call filesystem specific unlink if present */
-    if (parent->unlink != 0) {
-        int r = parent->unlink(parent, basename);
-        if (r != 0) return r;
-    }
-
-    /* Find node in parent's children list */
+    /* Find node in parent's children list first */
     struct vfs_node *prev = 0;
     struct vfs_node *node = parent->children;
     while (node != 0) {
@@ -974,6 +1190,12 @@ int vfs_unlink(const char *path)
     }
     if (node == 0) return -ENOENT;
     if (node->type == VFS_TYPE_DIR && node->children != 0) return -ENOTEMPTY;
+
+    /* Call filesystem specific unlink if present, but NOT for in-memory symlinks */
+    if (parent->unlink != 0 && node->type != VFS_TYPE_LINK) {
+        int r = parent->unlink(parent, basename);
+        if (r != 0) return r;
+    }
 
     /* Unlink from sibling list */
     if (prev != 0) {
@@ -997,7 +1219,8 @@ int vfs_rename(const char *oldpath, const char *newpath)
     if (oldpath == 0 || newpath == 0) return -EINVAL;
 
     /* Unlink target if it exists (overwrite) */
-    struct vfs_node *target = vfs_lookup(newpath);
+    int lookup_err = 0;
+    struct vfs_node *target = vfs_resolve_path_at(root_node, newpath, false, &lookup_err);
     if (target != 0) {
         int r = vfs_unlink(newpath);
         if (r != 0) return r;
@@ -1097,4 +1320,131 @@ void file_close(struct file *f)
         }
         kfree(f);
     }
+}
+
+/* ------------------------------------------------------------------ */
+/* Mount table implementation                                          */
+/* ------------------------------------------------------------------ */
+
+static struct mount_entry mount_table[MOUNT_MAX];
+
+void vfs_mount_table_init(void)
+{
+    for (int i = 0; i < MOUNT_MAX; i++) {
+        mount_table[i].valid = false;
+    }
+}
+
+void vfs_mount(const char *mountpoint, struct vfs_node *root, const char *fstype)
+{
+    if (!mountpoint || !root) return;
+
+    /* Check if already mounted — update root in place */
+    for (int i = 0; i < MOUNT_MAX; i++) {
+        if (mount_table[i].valid &&
+            strcmp(mount_table[i].mountpoint, mountpoint) == 0) {
+            mount_table[i].root = root;
+            return;
+        }
+    }
+
+    /* Find a free slot */
+    for (int i = 0; i < MOUNT_MAX; i++) {
+        if (!mount_table[i].valid) {
+            size_t mp_len = strlen(mountpoint);
+            if (mp_len >= sizeof(mount_table[i].mountpoint))
+                mp_len = sizeof(mount_table[i].mountpoint) - 1;
+            memcpy(mount_table[i].mountpoint, mountpoint, mp_len);
+            mount_table[i].mountpoint[mp_len] = '\0';
+
+            mount_table[i].root = root;
+
+            size_t ft_len = fstype ? strlen(fstype) : 0;
+            if (ft_len >= sizeof(mount_table[i].fstype))
+                ft_len = sizeof(mount_table[i].fstype) - 1;
+            if (fstype) memcpy(mount_table[i].fstype, fstype, ft_len);
+            mount_table[i].fstype[ft_len] = '\0';
+
+            mount_table[i].valid = true;
+            printk("VFS: mounted %s at %s\n", fstype ? fstype : "?", mountpoint);
+            return;
+        }
+    }
+
+    printk("VFS: mount table full, cannot mount %s\n", mountpoint);
+}
+
+void vfs_umount(const char *mountpoint)
+{
+    if (!mountpoint) return;
+    for (int i = 0; i < MOUNT_MAX; i++) {
+        if (mount_table[i].valid &&
+            strcmp(mount_table[i].mountpoint, mountpoint) == 0) {
+            mount_table[i].valid = false;
+            printk("VFS: unmounted %s\n", mountpoint);
+            return;
+        }
+    }
+}
+
+/*
+ * vfs_find_mount — return the mount entry whose mountpoint is the
+ * longest prefix of 'path', or NULL if none matches.
+ */
+struct mount_entry *vfs_find_mount(const char *path)
+{
+    if (!path) return 0;
+    struct mount_entry *best = 0;
+    size_t best_len = 0;
+
+    for (int i = 0; i < MOUNT_MAX; i++) {
+        if (!mount_table[i].valid) continue;
+        size_t mp_len = strlen(mount_table[i].mountpoint);
+        if (mp_len > best_len &&
+            strncmp(path, mount_table[i].mountpoint, mp_len) == 0 &&
+            (path[mp_len] == '/' || path[mp_len] == '\0')) {
+            best = &mount_table[i];
+            best_len = mp_len;
+        }
+    }
+    return best;
+}
+
+/* ------------------------------------------------------------------ */
+/* Permission checking                                                  */
+/* ------------------------------------------------------------------ */
+
+int vfs_check_permission(struct vfs_node *node, int access_mode)
+{
+    if (!node) return -ENOENT;
+
+    /* Retrieve effective credentials from the current task */
+    uint32_t euid = 0, egid = 0;
+    if (current_task && current_task->process) {
+        euid = current_task->process->euid;
+        egid = current_task->process->egid;
+    }
+
+    /* root (euid 0) bypasses all permission checks */
+    if (euid == 0) return 0;
+
+    uint32_t mode = node->mode & 0777;
+    uint32_t check_bits;
+
+    if (node->uid == euid) {
+        /* Owner permissions (bits 8-6) */
+        check_bits = (mode >> 6) & 7;
+    } else if (node->gid == egid) {
+        /* Group permissions (bits 5-3) */
+        check_bits = (mode >> 3) & 7;
+    } else {
+        /* Other permissions (bits 2-0) */
+        check_bits = mode & 7;
+    }
+
+    if ((access_mode & VFS_ACCESS_READ)  && !(check_bits & 4)) return -EACCES;
+    if ((access_mode & VFS_ACCESS_WRITE) && !(check_bits & 2)) return -EACCES;
+    if ((access_mode & VFS_ACCESS_EXEC)  && !(check_bits & 1)) return -EACCES;
+
+    return 0;
 }

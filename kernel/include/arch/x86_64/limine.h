@@ -90,8 +90,23 @@ enum {
     LIMINE_MEMMAP_FRAMEBUFFER = 7,
 };
 
+#define LIMINE_KERNEL_FILE_REQUEST_ID_0 0xad97e90e83f1ed67ULL
+#define LIMINE_KERNEL_FILE_REQUEST_ID_1 0x31eb5d1c5ff23b69ULL
+
+struct limine_kernel_file_response {
+    uint64_t revision;
+    struct limine_file *kernel_file;
+};
+
+struct limine_kernel_file_request {
+    uint64_t id[4];
+    uint64_t revision;
+    struct limine_kernel_file_response *response;
+} PACKED;
+
 extern volatile struct limine_bootloader_info_request bootloader_info_request;
 extern volatile struct limine_memmap_request memmap_request;
 extern volatile struct limine_hhdm_request hhdm_request;
+extern volatile struct limine_kernel_file_request kernel_file_request;
 
 #endif

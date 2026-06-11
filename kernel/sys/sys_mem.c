@@ -46,6 +46,29 @@ static inline uint64_t page_align_down(uint64_t addr)
     return addr & ~(uint64_t)0xfff;
 }
 
+static int vma_find_exact_slot(struct process *proc, uint64_t start, uint64_t end)
+{
+    for (int i = 0; i < VMA_MAX; i++) {
+        if (proc->vmas[i].valid &&
+            proc->vmas[i].start <= start &&
+            proc->vmas[i].end >= end) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static void vma_drop_present_pages(struct process *proc, uint64_t start, uint64_t end)
+{
+    for (uint64_t vaddr = page_align_down(start); vaddr < page_align_up(end); vaddr += VMM_PAGE_SIZE) {
+        phys_addr_t phys;
+        if (vmm_virt_to_phys(proc->address_space, vaddr, &phys)) {
+            vmm_unmap(proc->address_space, vaddr);
+            pmm_free_page(phys);
+        }
+    }
+}
+
 /* ------------------------------------------------------------------ */
 /* sys_brk                                                              */
 /* ------------------------------------------------------------------ */
@@ -672,4 +695,144 @@ int64_t sys_mprotect(struct syscall_frame *frame)
 
     vma_merge_adjacent(proc);
     return 0;
+}
+
+#define MREMAP_MAYMOVE 1
+#define MREMAP_FIXED   2
+
+int64_t sys_mremap(struct syscall_frame *frame)
+{
+    uint64_t old_addr = (uint64_t)frame->rdi;
+    uint64_t old_size = (uint64_t)frame->rsi;
+    uint64_t new_size = (uint64_t)frame->rdx;
+    unsigned long flags = (unsigned long)frame->r10;
+    uint64_t new_addr_hint = (uint64_t)frame->r8;
+
+    if (current_task == 0 || current_task->process == 0)
+        return -(int64_t)EPERM;
+    if ((flags & ~(MREMAP_MAYMOVE | MREMAP_FIXED)) != 0)
+        return -(int64_t)EINVAL;
+    if ((flags & MREMAP_FIXED) && !(flags & MREMAP_MAYMOVE))
+        return -(int64_t)EINVAL;
+    if (old_size == 0 || new_size == 0 || (old_addr & 0xfff))
+        return -(int64_t)EINVAL;
+
+    struct process *proc = current_task->process;
+    uint64_t old_len = page_align_up(old_size);
+    uint64_t new_len = page_align_up(new_size);
+    uint64_t old_end = old_addr + old_len;
+    if (old_end < old_addr)
+        return -(int64_t)EINVAL;
+
+    int vma_index = vma_find_exact_slot(proc, old_addr, old_end);
+    if (vma_index < 0)
+        return -(int64_t)EFAULT;
+
+    struct vma *vma = &proc->vmas[vma_index];
+    if (vma->start != old_addr)
+        return -(int64_t)EFAULT;
+
+    if (new_len == old_len)
+        return (int64_t)old_addr;
+
+    if (new_len < old_len) {
+        struct syscall_frame unmap_frame;
+        unmap_frame.rdi = old_addr + new_len;
+        unmap_frame.rsi = old_len - new_len;
+        int64_t ret = sys_munmap(&unmap_frame);
+        if (ret < 0)
+            return ret;
+        return (int64_t)old_addr;
+    }
+
+    uint64_t grow_end = old_addr + new_len;
+    if (grow_end < old_addr)
+        return -(int64_t)EINVAL;
+
+    if (!vma_overlaps(proc, old_end, grow_end)) {
+        vma->end = grow_end;
+        return (int64_t)old_addr;
+    }
+
+    if (!(flags & MREMAP_MAYMOVE))
+        return -(int64_t)ENOMEM;
+    if (flags & MREMAP_FIXED) {
+        if (new_addr_hint & 0xfff)
+            return -(int64_t)EINVAL;
+    }
+
+    uint64_t dst_addr = (flags & MREMAP_FIXED)
+        ? new_addr_hint
+        : vma_find_free_region(proc, new_addr_hint, new_len);
+    if (dst_addr == 0)
+        return -(int64_t)ENOMEM;
+    if ((flags & MREMAP_FIXED) && vma_overlaps(proc, dst_addr, dst_addr + new_len)) {
+        struct syscall_frame unmap_frame;
+        unmap_frame.rdi = dst_addr;
+        unmap_frame.rsi = new_len;
+        (void)sys_munmap(&unmap_frame);
+    }
+
+    for (uint64_t off = 0; off < old_len; off += VMM_PAGE_SIZE) {
+        phys_addr_t phys;
+        uint64_t src = old_addr + off;
+        uint64_t dst = dst_addr + off;
+        if (!vmm_virt_to_phys(proc->address_space, src, &phys))
+            continue;
+        vmm_unmap(proc->address_space, src);
+        if (vmm_map(proc->address_space, dst, phys, vma->flags) != 0) {
+            return -(int64_t)ENOMEM;
+        }
+    }
+
+    vma->start = dst_addr;
+    vma->end = dst_addr + new_len;
+    return (int64_t)dst_addr;
+}
+
+#define MADV_NORMAL     0
+#define MADV_RANDOM     1
+#define MADV_SEQUENTIAL 2
+#define MADV_WILLNEED   3
+#define MADV_DONTNEED   4
+
+int64_t sys_madvise(struct syscall_frame *frame)
+{
+    uint64_t addr = (uint64_t)frame->rdi;
+    uint64_t length = (uint64_t)frame->rsi;
+    int advice = (int)frame->rdx;
+
+    if (current_task == 0 || current_task->process == 0)
+        return -(int64_t)EPERM;
+    if (length == 0)
+        return 0;
+    if (addr & 0xfff)
+        return -(int64_t)EINVAL;
+
+    struct process *proc = current_task->process;
+    uint64_t end = addr + page_align_up(length);
+    if (end < addr)
+        return -(int64_t)EINVAL;
+
+    switch (advice) {
+    case MADV_NORMAL:
+    case MADV_RANDOM:
+    case MADV_SEQUENTIAL:
+    case MADV_WILLNEED:
+        return 0;
+    case MADV_DONTNEED:
+        for (int i = 0; i < VMA_MAX; i++) {
+            struct vma *vma = &proc->vmas[i];
+            if (!vma->valid)
+                continue;
+            if (addr < vma->end && end > vma->start) {
+                uint64_t drop_start = addr > vma->start ? addr : vma->start;
+                uint64_t drop_end = end < vma->end ? end : vma->end;
+                vma_drop_present_pages(proc, drop_start, drop_end);
+            }
+        }
+        return 0;
+    default:
+        return -(int64_t)EINVAL;
+    }
 }

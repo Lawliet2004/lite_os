@@ -76,6 +76,15 @@ static inline int64_t syscall4(int64_t num, int64_t arg1, int64_t arg2, int64_t 
     return ret;
 }
 
+static inline int64_t syscall5(int64_t num, int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4, int64_t arg5)
+{
+    int64_t ret;
+    register int64_t r10 __asm__("r10") = arg4;
+    register int64_t r8  __asm__("r8")  = arg5;
+    __asm__ volatile("syscall" : "=a"(ret) : "a"(num), "D"(arg1), "S"(arg2), "d"(arg3), "r"(r10), "r"(r8) : "rcx", "r11", "memory");
+    return ret;
+}
+
 static inline int64_t __attribute__((unused))
 syscall6(int64_t num, int64_t a1, int64_t a2, int64_t a3,
          int64_t a4, int64_t a5, int64_t a6)
@@ -363,6 +372,31 @@ int prlimit64(int pid, int resource, const struct rlimit *new_limit, struct rlim
     return (int)syscall4(302, (int64_t)pid, (int64_t)resource, (int64_t)new_limit, (int64_t)old_limit);
 }
 
+int getresuid(uint32_t *ruid, uint32_t *euid, uint32_t *suid)
+{
+    return (int)syscall3(118, (int64_t)ruid, (int64_t)euid, (int64_t)suid);
+}
+
+int setresuid(uint32_t ruid, uint32_t euid, uint32_t suid)
+{
+    return (int)syscall3(117, (int64_t)ruid, (int64_t)euid, (int64_t)suid);
+}
+
+int getresgid(uint32_t *rgid, uint32_t *egid, uint32_t *sgid)
+{
+    return (int)syscall3(120, (int64_t)rgid, (int64_t)egid, (int64_t)sgid);
+}
+
+int setresgid(uint32_t rgid, uint32_t egid, uint32_t sgid)
+{
+    return (int)syscall3(119, (int64_t)rgid, (int64_t)egid, (int64_t)sgid);
+}
+
+int prctl(int option, unsigned long arg2, unsigned long arg3, unsigned long arg4, unsigned long arg5)
+{
+    return (int)syscall5(157, (int64_t)option, (int64_t)arg2, (int64_t)arg3, (int64_t)arg4, (int64_t)arg5);
+}
+
 
 /* ------------------------------------------------------------------ */
 /* Memory                                                               */
@@ -383,6 +417,61 @@ void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset)
 int munmap(void *addr, size_t length)
 {
     return (int)syscall2(11, (int64_t)addr, (int64_t)length);
+}
+
+void *mremap(void *old_address, size_t old_size, size_t new_size, int flags, void *new_address)
+{
+    int64_t ret = syscall5(25, (int64_t)old_address, (int64_t)old_size, (int64_t)new_size, (int64_t)flags, (int64_t)new_address);
+    return (void *)ret;
+}
+
+int madvise(void *addr, size_t length, int advice)
+{
+    return (int)syscall3(28, (int64_t)addr, (int64_t)length, (int64_t)advice);
+}
+
+/* ------------------------------------------------------------------ */
+/* Select / epoll / socket message helpers                             */
+/* ------------------------------------------------------------------ */
+
+int select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds, struct timeval *timeout)
+{
+    return (int)syscall5(23, (int64_t)nfds, (int64_t)readfds, (int64_t)writefds, (int64_t)exceptfds, (int64_t)timeout);
+}
+
+int pselect6(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds, const struct timespec *timeout, const void *sigmask)
+{
+    return (int)syscall6(270, (int64_t)nfds, (int64_t)readfds, (int64_t)writefds, (int64_t)exceptfds, (int64_t)timeout, (int64_t)sigmask);
+}
+
+int epoll_create1(int flags)
+{
+    return (int)syscall1(291, (int64_t)flags);
+}
+
+int epoll_ctl(int epfd, int op, int fd, struct epoll_event *event)
+{
+    return (int)syscall4(233, (int64_t)epfd, (int64_t)op, (int64_t)fd, (int64_t)event);
+}
+
+int epoll_wait(int epfd, struct epoll_event *events, int maxevents, int timeout)
+{
+    return (int)syscall4(232, (int64_t)epfd, (int64_t)events, (int64_t)maxevents, (int64_t)timeout);
+}
+
+int socketpair(int domain, int type, int protocol, int sv[2])
+{
+    return (int)syscall4(53, (int64_t)domain, (int64_t)type, (int64_t)protocol, (int64_t)sv);
+}
+
+ssize_t sendmsg(int sockfd, const struct msghdr *msg, int flags)
+{
+    return (ssize_t)syscall3(46, (int64_t)sockfd, (int64_t)msg, (int64_t)flags);
+}
+
+ssize_t recvmsg(int sockfd, struct msghdr *msg, int flags)
+{
+    return (ssize_t)syscall3(47, (int64_t)sockfd, (int64_t)msg, (int64_t)flags);
 }
 
 
@@ -682,4 +771,9 @@ ssize_t sendto(int sockfd, const void *buf, size_t len, int flags, const struct 
 ssize_t recvfrom(int sockfd, void *buf, size_t len, int flags, struct sockaddr *src_addr, socklen_t *addrlen)
 {
     return (ssize_t)syscall6(45, (int64_t)sockfd, (int64_t)buf, (int64_t)len, (int64_t)flags, (int64_t)src_addr, (int64_t)addrlen);
+}
+
+int reboot(int cmd)
+{
+    return (int)syscall3(169, 0xfee1dead, 672274793, (int64_t)cmd);
 }

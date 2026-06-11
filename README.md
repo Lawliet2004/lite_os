@@ -154,6 +154,17 @@ make TEST=pagefault run
 
 The kernel should print CPU exception diagnostics and then panic.
 
+## Distro Experience
+
+LiteNix now provides a "Mini Distro Experience v1" with an installer, package manager, and service management.
+
+For details, see [docs/distro-experience.md](docs/distro-experience.md).
+
+### Quick Commands:
+- `litenix-install`: Install the OS to persistent disk.
+- `lpkg`: Manage LiteNix packages.
+- `service`: Manage system services.
+
 ## Next Step
 
 Keep the current verification matrix stable, then choose one small milestone:

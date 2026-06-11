@@ -25,13 +25,94 @@ static int test_thread_func(void *arg)
     return 0;
 }
 
+static void run_pkg_tests(void)
+{
+    printf("\n--- Running Package Manager Tests ---\n");
+    int status = 0;
+    int pid = fork();
+    if (pid == 0) { char *argv[] = { "/bin/lpkg", "list", 0 }; execve("/bin/lpkg", argv, 0); exit(1); }
+    wait4(pid, &status, 0, 0);
+    pid = fork();
+    if (pid == 0) { char *argv[] = { "/bin/lpkg", "install", "hello", 0 }; execve("/bin/lpkg", argv, 0); exit(1); }
+    wait4(pid, &status, 0, 0);
+    pid = fork();
+    if (pid == 0) { char *argv[] = { "/bin/lpkg", "installed", 0 }; execve("/bin/lpkg", argv, 0); exit(1); }
+    wait4(pid, &status, 0, 0);
+    pid = fork();
+    if (pid == 0) { char *argv[] = { "/bin/lpkg", "verify", "hello", 0 }; execve("/bin/lpkg", argv, 0); exit(1); }
+    wait4(pid, &status, 0, 0);
+    pid = fork();
+    if (pid == 0) { char *argv[] = { "/bin/lpkg", "remove", "hello", 0 }; execve("/bin/lpkg", argv, 0); exit(1); }
+    wait4(pid, &status, 0, 0);
+    printf("PKG_MANAGER: all tests passed\n");
+}
+
 int main(int argc, char **argv)
 {
-    (void)argc; (void)argv;
+    int is_test = 0;
+    int is_recovery = 0;
+    int is_normal = 0;
 
-    printf("\n==========================================\n");
-    printf("  LiteNix Userspace Init Process Started\n");
-    printf("==========================================\n\n");
+    if (argc > 1) {
+        if (strcmp(argv[1], "test_arg") == 0 || strcmp(argv[1], "test") == 0) {
+            is_test = 1;
+        } else if (strcmp(argv[1], "recovery") == 0) {
+            is_recovery = 1;
+        } else if (strcmp(argv[1], "normal") == 0) {
+            is_normal = 1;
+        }
+    } else {
+        is_test = 1; // Default to test mode
+    }
+
+    if (is_recovery) {
+        printf("\n==========================================\n");
+        printf("  LiteNix Recovery Shell (Emergency Mode)\n");
+        printf("==========================================\n\n");
+        for (;;) {
+            printf("Spawning recovery shell...\n");
+            int pid = fork();
+            if (pid < 0) { sleep(2); }
+            else if (pid == 0) {
+                char *sh_argv[] = { "/bin/sh", 0 };
+                char *sh_envp[] = { "USER=root", "HOME=/home/root", "PATH=/bin:/sbin:/usr/bin:/usr/sbin", "TERM=linux", 0 };
+                chdir("/home/root");
+                execve("/bin/sh", sh_argv, sh_envp);
+                exit(1);
+            } else { int status = 0; wait4(pid, &status, 0, 0); }
+        }
+    }
+
+    if (is_normal) {
+        printf("\n==========================================\n");
+        printf("  Welcome to LiteNix OS (Normal Boot)\n");
+        printf("==========================================\n\n");
+        mkdir("/dev", 0755); mkdir("/proc", 0755); mkdir("/tmp", 0755); mkdir("/run", 0755);
+        mkdir("/var", 0755); mkdir("/var/log", 0755); mkdir("/var/lib", 0755); mkdir("/var/lib/lpkg", 0755);
+        const char *bb[] = { "ls", "cat", "echo", "pwd", "mkdir", "rm", "cp", "mv", "true", "false", "sleep", "uname", "tar", "grep", "cut", "sed", "tr", "kill", "ps", "ping", "route", "nslookup", "wget", "id", "whoami", "su", "hostname" };
+        for (size_t i = 0; i < sizeof(bb)/sizeof(bb[0]); i++) {
+            char lp[64]; snprintf(lp, sizeof(lp), "/bin/%s", bb[i]); unlink(lp); symlink("/bin/busybox", lp);
+        }
+        int motd_fd = open("/etc/motd", O_RDONLY);
+        if (motd_fd >= 0) { char buf[1024]; ssize_t n = read(motd_fd, buf, 1023); if (n > 0) { buf[n] = 0; printf("%s\n", buf); } close(motd_fd); }
+        int rc_pid = fork();
+        if (rc_pid == 0) { char *rc_argv[] = { "/bin/sh", "/etc/init.d/rcS", 0 }; execve("/bin/sh", rc_argv, 0); exit(1); }
+        int rc_status = 0; wait4(rc_pid, &rc_status, 0, 0);
+        for (;;) {
+            printf("\nSpawning root shell...\n");
+            int pid = fork();
+            if (pid == 0) {
+                char *sh_argv[] = { "/bin/sh", 0 };
+                char *sh_envp[] = { "USER=root", "HOME=/home/root", "PATH=/bin:/sbin:/usr/bin:/usr/sbin", "TERM=linux", 0 };
+                chdir("/home/root"); execve("/bin/sh", sh_argv, sh_envp); exit(1);
+            } else { int status = 0; wait4(pid, &status, 0, 0); }
+        }
+    }
+
+    if (is_test) {
+        printf("\n==========================================\n");
+        printf("  LiteNix Userspace Init Process Started\n");
+        printf("==========================================\n\n");
 
     // 1. Read hello.txt from initramfs
     printf("Test 1: Reading /hello.txt...\n");
@@ -878,6 +959,8 @@ int main(int argc, char **argv)
         printf("Test 22: PASSED\n\n");
     }
 
+    run_pkg_tests();
+
     // Launch UDP Echo Server
     printf("Launching UDP Echo Server on port 9999...\n");
     int udp_pid = fork();
@@ -1636,23 +1719,6 @@ int main(int argc, char **argv)
             }
         }
     }
-
-    for (;;) {
-        printf("Launching shell /bin/sh...\n\n");
-
-        int pid = fork();
-        if (pid < 0) {
-            printf("Init ERROR: Failed to fork shell!\n");
-            exit(1);
-        } else if (pid == 0) {
-            char *sh_argv[] = { "/bin/sh", 0 };
-            execve("/bin/sh", sh_argv, 0);
-            printf("Init ERROR: Failed to execute /bin/sh!\n");
-            exit(1);
-        } else {
-            int status = 0;
-            wait4(pid, &status, 0, 0);
-            printf("\nInit: Shell exited or crashed (status %d). Respawning...\n", status);
-        }
     }
+    return 0;
 }

@@ -1,0 +1,5 @@
+#include "libc_lite.h"
+
+// Note: service is implemented as a shell script.
+// But the user requested it to feel distro-like.
+// I'll rewrite user/service.sh to be more robust.

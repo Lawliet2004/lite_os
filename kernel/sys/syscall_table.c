@@ -56,6 +56,8 @@ static __attribute__((unused)) const char *syscall_name(unsigned nr)
     case SYS_fchmodat:   return "fchmodat";
     case SYS_dup3:       return "dup3";
     case SYS_renameat2:  return "renameat2";
+    case SYS_mount:      return "mount";
+    case SYS_umount2:    return "umount2";
 
     /* ---- Memory ---- */
     case SYS_mmap:       return "mmap";
@@ -108,6 +110,7 @@ static __attribute__((unused)) const char *syscall_name(unsigned nr)
     case SYS_uname:          return "uname";
     case SYS_getrlimit:      return "getrlimit";
     case SYS_prlimit64:      return "prlimit64";
+    case SYS_reboot:         return "reboot";
 
     /* ---- Sockets ---- */
     case SYS_socket:       return "socket";
@@ -117,6 +120,24 @@ static __attribute__((unused)) const char *syscall_name(unsigned nr)
     case SYS_recvfrom:     return "recvfrom";
     case SYS_bind:         return "bind";
     case SYS_listen:       return "listen";
+    case SYS_select:       return "select";
+    case SYS_pselect6:     return "pselect6";
+    case SYS_epoll_create1: return "epoll_create1";
+    case SYS_epoll_ctl:    return "epoll_ctl";
+    case SYS_epoll_wait:   return "epoll_wait";
+    case SYS_sendmsg:      return "sendmsg";
+    case SYS_recvmsg:      return "recvmsg";
+    case SYS_socketpair:   return "socketpair";
+    case SYS_setsockopt:   return "setsockopt";
+    case SYS_getsockopt:   return "getsockopt";
+    case SYS_shutdown:     return "shutdown";
+    case SYS_mremap:       return "mremap";
+    case SYS_madvise:      return "madvise";
+    case SYS_prctl:        return "prctl";
+    case SYS_getresuid:    return "getresuid";
+    case SYS_setresuid:    return "setresuid";
+    case SYS_getresgid:    return "getresgid";
+    case SYS_setresgid:    return "setresgid";
 
     default:               return "unknown";
     }
@@ -168,6 +189,7 @@ static __attribute__((unused)) const char *errno_name(int64_t err)
     case EAFNOSUPPORT: return "EAFNOSUPPORT";
     case EISCONN:     return "EISCONN";
     case ENOTCONN:    return "ENOTCONN";
+    case 111:         return "ECONNREFUSED";
     default:          return "EUNKNOWN";
     }
 }
@@ -219,6 +241,8 @@ int64_t sys_symlinkat(struct syscall_frame *frame);
 int64_t sys_fchmodat(struct syscall_frame *frame);
 int64_t sys_dup3(struct syscall_frame *frame);
 int64_t sys_renameat2(struct syscall_frame *frame);
+int64_t sys_mount(struct syscall_frame *frame);
+int64_t sys_umount2(struct syscall_frame *frame);
 
 /* process lifecycle (sys_exit.c) */
 int64_t sys_exit(struct syscall_frame *frame);
@@ -256,6 +280,7 @@ int64_t sys_get_robust_list(struct syscall_frame *frame);
 int64_t sys_getrandom(struct syscall_frame *frame);
 int64_t sys_getrlimit(struct syscall_frame *frame);
 int64_t sys_prlimit64(struct syscall_frame *frame);
+int64_t sys_reboot(struct syscall_frame *frame);
 
 /* Sockets (Phase 24) */
 int64_t sys_socket(struct syscall_frame *frame);
@@ -265,6 +290,32 @@ int64_t sys_sendto(struct syscall_frame *frame);
 int64_t sys_recvfrom(struct syscall_frame *frame);
 int64_t sys_bind(struct syscall_frame *frame);
 int64_t sys_listen(struct syscall_frame *frame);
+
+/* Epoll and select (sys_epoll.c) */
+int64_t sys_select(struct syscall_frame *frame);
+int64_t sys_pselect6(struct syscall_frame *frame);
+int64_t sys_epoll_create1(struct syscall_frame *frame);
+int64_t sys_epoll_ctl(struct syscall_frame *frame);
+int64_t sys_epoll_wait(struct syscall_frame *frame);
+
+/* Process credentials (sys_process.c) */
+int64_t sys_getresuid(struct syscall_frame *frame);
+int64_t sys_setresuid(struct syscall_frame *frame);
+int64_t sys_getresgid(struct syscall_frame *frame);
+int64_t sys_setresgid(struct syscall_frame *frame);
+int64_t sys_prctl(struct syscall_frame *frame);
+
+/* Extended memory (sys_mem.c) */
+int64_t sys_mremap(struct syscall_frame *frame);
+int64_t sys_madvise(struct syscall_frame *frame);
+
+/* Extended sockets (socket.c) */
+int64_t sys_sendmsg(struct syscall_frame *frame);
+int64_t sys_recvmsg(struct syscall_frame *frame);
+int64_t sys_socketpair(struct syscall_frame *frame);
+int64_t sys_setsockopt(struct syscall_frame *frame);
+int64_t sys_getsockopt(struct syscall_frame *frame);
+int64_t sys_shutdown(struct syscall_frame *frame);
 
 /* Signals */
 int64_t sys_rt_sigaction(struct syscall_frame *frame);
@@ -349,6 +400,8 @@ void syscall_table_init(void)
     syscall_table[SYS_fchmodat]  = sys_fchmodat;
     syscall_table[SYS_dup3]      = sys_dup3;
     syscall_table[SYS_renameat2] = sys_renameat2;
+    syscall_table[SYS_mount]     = sys_mount;
+    syscall_table[SYS_umount2]   = sys_umount2;
 
     /* ---- Process ---- */
     syscall_table[SYS_getpid]    = sys_getpid;
@@ -395,6 +448,7 @@ void syscall_table_init(void)
     syscall_table[SYS_uname]            = sys_uname;
     syscall_table[SYS_getrlimit]         = sys_getrlimit;
     syscall_table[SYS_prlimit64]         = sys_prlimit64;
+    syscall_table[SYS_reboot]            = sys_reboot;
 
     /* ---- Sockets ---- */
     syscall_table[SYS_socket]            = sys_socket;
@@ -404,6 +458,32 @@ void syscall_table_init(void)
     syscall_table[SYS_recvfrom]          = sys_recvfrom;
     syscall_table[SYS_bind]              = sys_bind;
     syscall_table[SYS_listen]            = sys_listen;
+
+    /* ---- Epoll and Select ---- */
+    syscall_table[SYS_select]        = sys_select;
+    syscall_table[SYS_pselect6]      = sys_pselect6;
+    syscall_table[SYS_epoll_wait]    = sys_epoll_wait;
+    syscall_table[SYS_epoll_ctl]     = sys_epoll_ctl;
+    syscall_table[SYS_epoll_create1] = sys_epoll_create1;
+
+    /* ---- Process Credentials ---- */
+    syscall_table[SYS_getresuid]     = sys_getresuid;
+    syscall_table[SYS_setresuid]     = sys_setresuid;
+    syscall_table[SYS_getresgid]     = sys_getresgid;
+    syscall_table[SYS_setresgid]     = sys_setresgid;
+    syscall_table[SYS_prctl]         = sys_prctl;
+
+    /* ---- Extended Memory ---- */
+    syscall_table[SYS_mremap]        = sys_mremap;
+    syscall_table[SYS_madvise]       = sys_madvise;
+
+    /* ---- Extended Sockets ---- */
+    syscall_table[SYS_sendmsg]       = sys_sendmsg;
+    syscall_table[SYS_recvmsg]       = sys_recvmsg;
+    syscall_table[SYS_socketpair]    = sys_socketpair;
+    syscall_table[SYS_setsockopt]    = sys_setsockopt;
+    syscall_table[SYS_getsockopt]    = sys_getsockopt;
+    syscall_table[SYS_shutdown]      = sys_shutdown;
 }
 
 int64_t syscall_dispatch(struct syscall_frame *frame)
@@ -440,3 +520,12 @@ int64_t syscall_dispatch(struct syscall_frame *frame)
 
     return ret;
 }
+
+__attribute__((weak)) int64_t sys_mremap(struct syscall_frame *frame) { (void)frame; return -38; }
+__attribute__((weak)) int64_t sys_madvise(struct syscall_frame *frame) { (void)frame; return -38; }
+__attribute__((weak)) int64_t sys_sendmsg(struct syscall_frame *frame) { (void)frame; return -38; }
+__attribute__((weak)) int64_t sys_recvmsg(struct syscall_frame *frame) { (void)frame; return -38; }
+__attribute__((weak)) int64_t sys_socketpair(struct syscall_frame *frame) { (void)frame; return -38; }
+__attribute__((weak)) int64_t sys_setsockopt(struct syscall_frame *frame) { (void)frame; return -38; }
+__attribute__((weak)) int64_t sys_getsockopt(struct syscall_frame *frame) { (void)frame; return -38; }
+__attribute__((weak)) int64_t sys_shutdown(struct syscall_frame *frame) { (void)frame; return -38; }

@@ -36,6 +36,10 @@ typedef int64_t off_t;
 #define S_IFCHR  0020000
 #define S_IFLNK  0120000
 
+#define S_ISUID  04000
+#define S_ISGID  02000
+#define S_ISVTX  01000
+
 #define S_IRUSR 00400
 #define S_IWUSR 00200
 #define S_IXUSR 00100
@@ -106,6 +110,7 @@ typedef int (*vfs_truncate_t)(struct vfs_node *node, size_t new_size);
 typedef int (*vfs_create_t)(struct vfs_node *parent, const char *name, uint32_t mode, struct vfs_node **out_node);
 typedef int (*vfs_mkdir_t)(struct vfs_node *parent, const char *name, uint32_t mode);
 typedef int (*vfs_unlink_t)(struct vfs_node *parent, const char *name);
+typedef int (*vfs_poll_t)(struct vfs_node *node, short events, short *revents);
 
 struct vfs_node {
     char name[128];
@@ -129,6 +134,7 @@ struct vfs_node {
     vfs_readdir_t readdir;
     vfs_close_t close;
     vfs_truncate_t truncate;
+    vfs_poll_t poll;
     vfs_create_t create;
     vfs_mkdir_t mkdir;
     vfs_unlink_t unlink;
@@ -153,12 +159,37 @@ struct vfs_node *vfs_resolve_path_at(struct vfs_node *start_node, const char *pa
 struct vfs_node *vfs_create_file(const char *path, uint32_t type, size_t size, const void *data);
 struct vfs_node *vfs_create_symlink(const char *target, const char *linkpath);
 struct vfs_node *vfs_create_device(const char *path, vfs_read_t read, vfs_write_t write);
+void vfs_setup_pseudo_filesystems(void);
+void vfs_clear_node_children(struct vfs_node *node);
 
 /* Directory / file mutation */
-int vfs_mkdir(const char *path);
+int vfs_mkdir(const char *path, uint32_t mode);
 int vfs_unlink(const char *path);
 int vfs_rename(const char *oldpath, const char *newpath);
 int vfs_truncate(struct vfs_node *node, size_t new_size);
 void file_close(struct file *f);
+
+/* ------------------------------------------------------------------ */
+/* Mount table                                                         */
+/* ------------------------------------------------------------------ */
+#define MOUNT_MAX 16
+
+struct mount_entry {
+    char mountpoint[256];    /* e.g. "/proc", "/dev", "/" */
+    struct vfs_node *root;   /* root node of the mounted filesystem */
+    char fstype[32];         /* e.g. "ext2", "procfs", "devfs", "tmpfs" */
+    bool valid;
+};
+
+void vfs_mount(const char *mountpoint, struct vfs_node *root, const char *fstype);
+void vfs_umount(const char *mountpoint);
+struct mount_entry *vfs_find_mount(const char *path);
+void vfs_mount_table_init(void);
+
+/* Permission check helper */
+int vfs_check_permission(struct vfs_node *node, int access_mode);
+#define VFS_ACCESS_READ  1
+#define VFS_ACCESS_WRITE 2
+#define VFS_ACCESS_EXEC  4
 
 #endif

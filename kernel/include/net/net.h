@@ -110,6 +110,7 @@ struct tcp_hdr {
 
 struct socket {
     bool valid;
+    int domain;
     int type;
     uint16_t local_port;
     uint16_t remote_port;
@@ -134,6 +135,11 @@ struct socket {
     bool bound;
     bool connected;
     bool closed;
+    bool shutdown_read;
+    bool shutdown_write;
+    int so_error;
+    int so_reuseaddr;
+    struct socket *peer;
 
     struct wait_queue wait_q;
 };

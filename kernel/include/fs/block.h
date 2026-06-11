@@ -18,5 +18,6 @@ struct block_device {
 
 void block_device_register(struct block_device *dev);
 struct block_device *block_device_get(const char *name);
+void block_devices_reregister_all(void);
 
 #endif

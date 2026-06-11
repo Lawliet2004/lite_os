@@ -42,5 +42,6 @@ int tty_driver_read(void *buf, size_t count);
 int tty_driver_write(const void *buf, size_t count);
 void tty_input_char(char ch);
 int tty_ioctl(uint64_t req, void *argp);
+bool tty_has_input(void);
 
 #endif

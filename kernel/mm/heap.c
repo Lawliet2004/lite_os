@@ -1,5 +1,6 @@
 #include <mm/heap.h>
 #include <arch/x86_64/vmm.h>
+#include <arch/x86_64/cpu.h>
 #include <kernel/panic.h>
 #include <kernel/printk.h>
 #include <lib/string.h>
@@ -7,6 +8,10 @@
 #include <mm/pmm.h>
 #include <stddef.h>
 #include <stdint.h>
+
+static void *kmalloc_unlocked(size_t size);
+static void kfree_unlocked(void *ptr);
+static void *krealloc_unlocked(void *ptr, size_t new_size);
 
 #define HEAP_START 0xffffffffa0000000ULL
 #define HEAP_SIZE  0x10000000ULL
@@ -161,7 +166,7 @@ void heap_init(void)
     printk("Heap: alloc_header=%u slab_header=%u\n", (uint32_t)sizeof(struct alloc_header), (uint32_t)sizeof(struct slab_header));
 }
 
-void *kmalloc(size_t size)
+static void *kmalloc_unlocked(size_t size)
 {
     if (size == 0) return 0;
 
@@ -235,7 +240,7 @@ void *kzalloc(size_t size)
     return ptr;
 }
 
-void kfree(void *ptr)
+static void kfree_unlocked(void *ptr)
 {
     if (ptr == 0) return;
 
@@ -249,7 +254,7 @@ void kfree(void *ptr)
     if (hdr->magic == MAGIC_ALIGNED) {
         void *base = hdr->base;
         hdr->magic = MAGIC_FREE;
-        kfree(base);
+        kfree_unlocked(base);
         return;
     }
 
@@ -322,11 +327,11 @@ void kfree(void *ptr)
     }
 }
 
-void *krealloc(void *ptr, size_t new_size)
+static void *krealloc_unlocked(void *ptr, size_t new_size)
 {
-    if (ptr == 0) return kmalloc(new_size);
+    if (ptr == 0) return kmalloc_unlocked(new_size);
     if (new_size == 0) {
-        kfree(ptr);
+        kfree_unlocked(ptr);
         return 0;
     }
 
@@ -349,7 +354,7 @@ void *krealloc(void *ptr, size_t new_size)
         }
     }
 
-    void *new_ptr = kmalloc(new_size);
+    void *new_ptr = kmalloc_unlocked(new_size);
     if (new_ptr == 0) return 0;
 
     size_t copy_size = 0;
@@ -361,7 +366,7 @@ void *krealloc(void *ptr, size_t new_size)
     if (copy_size > new_size) copy_size = new_size;
 
     memcpy(new_ptr, ptr, copy_size);
-    kfree(ptr);
+    kfree_unlocked(ptr);
     return new_ptr;
 }
 
@@ -679,4 +684,27 @@ void heap_self_test(void)
 
     heap_print_stats();
     printk("Heap: self-test passed\n");
+}
+
+void *kmalloc(size_t size)
+{
+    bool flags = save_interrupts_and_disable();
+    void *ptr = kmalloc_unlocked(size);
+    restore_interrupts(flags);
+    return ptr;
+}
+
+void kfree(void *ptr)
+{
+    bool flags = save_interrupts_and_disable();
+    kfree_unlocked(ptr);
+    restore_interrupts(flags);
+}
+
+void *krealloc(void *ptr, size_t new_size)
+{
+    bool flags = save_interrupts_and_disable();
+    void *new_ptr = krealloc_unlocked(ptr, new_size);
+    restore_interrupts(flags);
+    return new_ptr;
 }

@@ -144,6 +144,7 @@ void sched_check_sleepers(void)
         sleep_list_head = task->sleep_next;
         task->sleep_next = 0;
         task->sleep_until = 0;
+        task->sleep_timed_out = true;
 
         if (task->state == TASK_SLEEPING) {
             task->state = TASK_READY;

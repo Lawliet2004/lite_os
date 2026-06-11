@@ -5,6 +5,7 @@
 #include <sched/task.h>
 #include <lib/string.h>
 #include <sys/syscall.h>
+#include <sched/wait_queue.h>
 
 struct tty_device console_tty;
 static uint32_t commit_count = 0;
@@ -85,6 +86,7 @@ void tty_input_char(char ch)
             canon_len = 0;
             commit_count++;
             wait_queue_wake_all(&console_tty.read_wq);
+            io_event_notify();
             return;
         }
 
@@ -103,13 +105,14 @@ void tty_input_char(char ch)
         if (next_head != console_tty.tail) {
             console_tty.ibuf[console_tty.head] = ch;
             console_tty.head = next_head;
-            if (ch == '\n') {
-                canon_len = 0;
-                commit_count++;
-                wait_queue_wake_all(&console_tty.read_wq);
-            } else {
-                canon_len++;
-            }
+                if (ch == '\n') {
+                    canon_len = 0;
+                    commit_count++;
+                    wait_queue_wake_all(&console_tty.read_wq);
+                    io_event_notify();
+                } else {
+                    canon_len++;
+                }
         }
     } else {
         /* Raw / Non-canonical Mode */
@@ -122,6 +125,7 @@ void tty_input_char(char ch)
             console_tty.ibuf[console_tty.head] = ch;
             console_tty.head = next_head;
             wait_queue_wake_all(&console_tty.read_wq);
+            io_event_notify();
         }
     }
 }
@@ -169,6 +173,14 @@ int tty_driver_read(void *buf, size_t count)
     }
 
     return (int)read_bytes;
+}
+
+bool tty_has_input(void)
+{
+    if ((console_tty.termios.c_lflag & 0x0002) /* ICANON */) {
+        return commit_count != 0;
+    }
+    return console_tty.head != console_tty.tail;
 }
 
 int tty_ioctl(uint64_t req, void *argp)

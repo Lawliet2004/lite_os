@@ -258,6 +258,54 @@ static bool valid_access_mode(int mode)
     return (mode & ~(R_OK | W_OK | X_OK)) == 0;
 }
 
+static bool current_is_root(void)
+{
+    return current_task && current_task->process && current_task->process->euid == 0;
+}
+
+static bool current_owns_node(struct vfs_node *node)
+{
+    return current_task && current_task->process && node &&
+           current_task->process->euid == node->uid;
+}
+
+static int node_required_access(int flags, struct vfs_node *node)
+{
+    int access_mode = 0;
+    switch (flags & 3) {
+    case O_WRONLY: access_mode |= VFS_ACCESS_WRITE; break;
+    case O_RDWR:   access_mode |= VFS_ACCESS_READ | VFS_ACCESS_WRITE; break;
+    default:       access_mode |= VFS_ACCESS_READ; break;
+    }
+    if ((flags & O_TRUNC) && node && node->type == VFS_TYPE_FILE) {
+        access_mode |= VFS_ACCESS_WRITE;
+    }
+    if ((flags & O_DIRECTORY) && node && node->type == VFS_TYPE_DIR) {
+        access_mode |= VFS_ACCESS_EXEC;
+    }
+    return access_mode;
+}
+
+static int parent_path_from_absolute(const char *path, char *parent_out, size_t parent_sz)
+{
+    size_t len = strlen(path);
+    if (len == 0 || path[0] != '/' || len >= parent_sz) return -EINVAL;
+    if (len == 1) {
+        strcpy(parent_out, "/");
+        return 0;
+    }
+    size_t last = len - 1;
+    while (last > 0 && path[last] == '/') last--;
+    while (last > 0 && path[last] != '/') last--;
+    if (last == 0) {
+        strcpy(parent_out, "/");
+        return 0;
+    }
+    memcpy(parent_out, path, last);
+    parent_out[last] = '\0';
+    return 0;
+}
+
 static struct vfs_node *resolve_dirfd_ex(int dirfd, const char *kpath, bool follow_last_symlink, int flags, int *err_out)
 {
     if (kpath[0] == '\0' && (flags & AT_EMPTY_PATH)) {
@@ -386,13 +434,27 @@ static int64_t open_copied_path_at(int dirfd, const char *kpath, int flags)
             char cleanpath[512];
             vfs_canonicalize_path(abspath, cleanpath);
 
+            char parent_path[512];
+            if (parent_path_from_absolute(cleanpath, parent_path, sizeof(parent_path)) != 0)
+                return -(int64_t)EINVAL;
+            struct vfs_node *parent = vfs_lookup(parent_path);
+            if (parent == 0) return -(int64_t)ENOENT;
+            int perm = vfs_check_permission(parent, VFS_ACCESS_WRITE | VFS_ACCESS_EXEC);
+            if (perm != 0) return perm;
+
             node = vfs_create_file(cleanpath, VFS_TYPE_FILE, 0, 0);
             if (node == 0) return -(int64_t)ENOMEM;
             node->mode = S_IFREG | ((0666 & ~proc->umask) & 07777);
+            node->uid = proc->euid;
+            node->gid = proc->egid;
         } else {
             return err;
         }
     }
+
+    int access = node_required_access(flags, node);
+    int perm = vfs_check_permission(node, access);
+    if (perm != 0) return perm;
 
     if ((flags & O_DIRECTORY) && node->type != VFS_TYPE_DIR) {
         return -(int64_t)ENOTDIR;
@@ -693,10 +755,11 @@ int64_t sys_faccessat(struct syscall_frame *frame)
     if (node == 0) return err;
 
     if (mode == F_OK) return 0;
-    if ((mode & X_OK) && node->type != VFS_TYPE_DIR && (node->mode & 0111) == 0) {
-        return -(int64_t)EACCES;
-    }
-    return 0;
+    int access = 0;
+    if (mode & R_OK) access |= VFS_ACCESS_READ;
+    if (mode & W_OK) access |= VFS_ACCESS_WRITE;
+    if (mode & X_OK) access |= VFS_ACCESS_EXEC;
+    return vfs_check_permission(node, access);
 }
 
 int64_t sys_access(struct syscall_frame *frame)
@@ -1082,15 +1145,21 @@ int64_t sys_mkdirat(struct syscall_frame *frame)
     char cleanpath[PATH_MAX_LEN];
     vfs_canonicalize_path(abspath, cleanpath);
 
+    char parent_path[PATH_MAX_LEN];
+    if (parent_path_from_absolute(cleanpath, parent_path, sizeof(parent_path)) != 0)
+        return -(int64_t)EINVAL;
+    struct vfs_node *parent = vfs_lookup(parent_path);
+    if (parent == 0) return -(int64_t)ENOENT;
+    int perm = vfs_check_permission(parent, VFS_ACCESS_WRITE | VFS_ACCESS_EXEC);
+    if (perm != 0) return perm;
+
     /* Check it doesn't already exist */
-    struct vfs_node *existing = vfs_lookup(cleanpath);
+    int lookup_err = 0;
+    struct vfs_node *existing = vfs_resolve_path_at(vfs_get_root(), cleanpath, false, &lookup_err);
     if (existing != 0) return -(int64_t)EEXIST;
 
-    struct vfs_node *node = vfs_create_file(cleanpath, VFS_TYPE_DIR, 0, 0);
-    if (node == 0) return -(int64_t)ENOMEM;
-
-    node->mode = S_IFDIR | ((mode & ~proc->umask) & 07777);
-    return 0;
+    int r = vfs_mkdir(cleanpath, S_IFDIR | ((mode & ~proc->umask) & 07777));
+    return r;
 }
 
 int64_t sys_mkdir(struct syscall_frame *frame)
@@ -1121,8 +1190,17 @@ int64_t sys_unlinkat(struct syscall_frame *frame)
     char cleanpath[PATH_MAX_LEN];
     vfs_canonicalize_path(abspath, cleanpath);
 
-    struct vfs_node *node = vfs_lookup(cleanpath);
+    int lookup_err = 0;
+    struct vfs_node *node = vfs_resolve_path_at(vfs_get_root(), cleanpath, false, &lookup_err);
     if (node == 0) return -(int64_t)ENOENT;
+
+    char parent_path[PATH_MAX_LEN];
+    if (parent_path_from_absolute(cleanpath, parent_path, sizeof(parent_path)) != 0)
+        return -(int64_t)EINVAL;
+    struct vfs_node *parent = vfs_lookup(parent_path);
+    if (parent == 0) return -(int64_t)ENOENT;
+    int perm = vfs_check_permission(parent, VFS_ACCESS_WRITE | VFS_ACCESS_EXEC);
+    if (perm != 0) return perm;
 
     if (flags & 0x200) { /* AT_REMOVEDIR */
         if (node->type != VFS_TYPE_DIR) return -(int64_t)ENOTDIR;
@@ -1185,6 +1263,19 @@ int64_t sys_renameat2(struct syscall_frame *frame)
     vfs_canonicalize_path(old_abspath, old_clean);
     vfs_canonicalize_path(new_abspath, new_clean);
 
+    char old_parent_path[PATH_MAX_LEN];
+    char new_parent_path[PATH_MAX_LEN];
+    if (parent_path_from_absolute(old_clean, old_parent_path, sizeof(old_parent_path)) != 0 ||
+        parent_path_from_absolute(new_clean, new_parent_path, sizeof(new_parent_path)) != 0)
+        return -(int64_t)EINVAL;
+    struct vfs_node *old_parent = vfs_lookup(old_parent_path);
+    struct vfs_node *new_parent = vfs_lookup(new_parent_path);
+    if (old_parent == 0 || new_parent == 0) return -(int64_t)ENOENT;
+    int old_perm = vfs_check_permission(old_parent, VFS_ACCESS_WRITE | VFS_ACCESS_EXEC);
+    if (old_perm != 0) return old_perm;
+    int new_perm = vfs_check_permission(new_parent, VFS_ACCESS_WRITE | VFS_ACCESS_EXEC);
+    if (new_perm != 0) return new_perm;
+
     int ret = vfs_rename(old_clean, new_clean);
     if (ret == -ENOENT) return -(int64_t)ENOENT;
     if (ret != 0)       return -(int64_t)EINVAL;
@@ -1232,13 +1323,24 @@ int64_t sys_symlinkat(struct syscall_frame *frame)
     char link_clean[PATH_MAX_LEN];
     vfs_canonicalize_path(link_abspath, link_clean);
 
+    char parent_path[PATH_MAX_LEN];
+    if (parent_path_from_absolute(link_clean, parent_path, sizeof(parent_path)) != 0)
+        return -(int64_t)EINVAL;
+    struct vfs_node *parent = vfs_lookup(parent_path);
+    if (parent == 0) return -(int64_t)ENOENT;
+    int perm = vfs_check_permission(parent, VFS_ACCESS_WRITE | VFS_ACCESS_EXEC);
+    if (perm != 0) return perm;
+
     /* Check if link already exists */
-    struct vfs_node *existing = vfs_lookup(link_clean);
+    int lookup_err = 0;
+    struct vfs_node *existing = vfs_resolve_path_at(vfs_get_root(), link_clean, false, &lookup_err);
     if (existing != 0) return -(int64_t)EEXIST;
 
     struct vfs_node *node = vfs_create_symlink(ktarget, link_clean);
     if (node == 0) return -(int64_t)ENOMEM;
     node->mode = S_IFLNK | 0777;
+    node->uid = current_task->process->euid;
+    node->gid = current_task->process->egid;
     return 0;
 }
 
@@ -1268,6 +1370,7 @@ int64_t sys_fchmodat(struct syscall_frame *frame)
     bool follow = !(flags & 0x100); /* AT_SYMLINK_NOFOLLOW */
     struct vfs_node *node = resolve_dirfd_ex(dirfd, kpath, follow, flags, &err);
     if (node == 0) return err;
+    if (!current_is_root() && !current_owns_node(node)) return -(int64_t)EPERM;
 
     node->mode = (node->mode & S_IFMT) | (mode & 07777);
     return 0;
@@ -1295,6 +1398,7 @@ int64_t sys_fchmod(struct syscall_frame *frame)
         return -(int64_t)EBADF;
     struct file *f = proc->files[fd];
     if (f->node == 0) return -(int64_t)EBADF;
+    if (!current_is_root() && !current_owns_node(f->node)) return -(int64_t)EPERM;
 
     f->node->mode = (f->node->mode & S_IFMT) | (mode & 07777);
     return 0;
@@ -1318,6 +1422,7 @@ int64_t sys_chownat(struct syscall_frame *frame)
     bool follow = !(flags & 0x100); /* AT_SYMLINK_NOFOLLOW */
     struct vfs_node *node = resolve_dirfd_ex(dirfd, kpath, follow, flags, &err);
     if (node == 0) return err;
+    if (!current_is_root()) return -(int64_t)EPERM;
 
     if (owner != -1) node->uid = (uint32_t)owner;
     if (group != -1) node->gid = (uint32_t)group;
@@ -1359,6 +1464,7 @@ int64_t sys_fchown(struct syscall_frame *frame)
         return -(int64_t)EBADF;
     struct file *f = proc->files[fd];
     if (f->node == 0) return -(int64_t)EBADF;
+    if (!current_is_root()) return -(int64_t)EPERM;
 
     if (owner != -1) f->node->uid = (uint32_t)owner;
     if (group != -1) f->node->gid = (uint32_t)group;
@@ -1494,6 +1600,22 @@ int64_t sys_execve(struct syscall_frame *frame)
         return -(int64_t)ENOEXEC;
     }
 
+    if (vfs_check_permission(node, VFS_ACCESS_EXEC) != 0) {
+        for (int i = 0; i < envc; i++) kfree(kenvp[i]);
+        for (int i = 0; i < argc; i++) kfree(kargv[i]);
+        return -(int64_t)EACCES;
+    }
+
+    /* --- SetUID / SetGID Handling --- */
+    if (node->mode & S_ISUID) {
+        proc->euid = node->uid;
+        proc->suid = node->uid;
+    }
+    if (node->mode & S_ISGID) {
+        proc->egid = node->gid;
+        proc->sgid = node->gid;
+    }
+
     /* --- Close FD_CLOEXEC descriptors --- */
     for (int i = 0; i < MAX_FILES_PER_PROCESS; i++) {
         if (proc->files[i] != 0 && (proc->files[i]->fd_flags & FD_CLOEXEC)) {
@@ -1504,9 +1626,29 @@ int64_t sys_execve(struct syscall_frame *frame)
     }
 
     /* --- Load ELF --- */
+    void *elf_buf = kmalloc(node->size);
+    if (elf_buf == 0) {
+        for (int i = 0; i < envc; i++) kfree(kenvp[i]);
+        for (int i = 0; i < argc; i++) kfree(kargv[i]);
+        return -(int64_t)ENOMEM;
+    }
+    int read_bytes = 0;
+    if (node->read) {
+        read_bytes = node->read(node, 0, elf_buf, node->size);
+    } else {
+        read_bytes = -EIO;
+    }
+    if (read_bytes < 0 || (size_t)read_bytes != node->size) {
+        kfree(elf_buf);
+        for (int i = 0; i < envc; i++) kfree(kenvp[i]);
+        for (int i = 0; i < argc; i++) kfree(kargv[i]);
+        return -(int64_t)EIO;
+    }
+
     uint64_t entry = 0, rsp = 0;
-    int load_err = elf_load_into_process(proc, node->data, node->size,
+    int load_err = elf_load_into_process(proc, elf_buf, node->size,
                                           argc, kargv, kenvp, filename, &entry, &rsp);
+    kfree(elf_buf);
     if (load_err != 0) {
         for (int i = 0; i < envc; i++) kfree(kenvp[i]);
         for (int i = 0; i < argc; i++) kfree(kargv[i]);
@@ -1584,6 +1726,7 @@ static int pipe_read(struct vfs_node *node, size_t offset, void *buf, size_t cou
     }
 
     wait_queue_wake_all(&p->write_wq);
+    io_event_notify();
     return (int)read_bytes;
 }
 
@@ -1630,6 +1773,7 @@ static int pipe_write(struct vfs_node *node, size_t offset, const void *buf, siz
         }
         count -= chunk;
         wait_queue_wake_all(&p->read_wq);
+        io_event_notify();
     }
 
     return (int)written_bytes;
@@ -1644,11 +1788,13 @@ static int pipe_close(struct vfs_node *node, struct file *f)
         p->writers--;
         if (p->writers == 0) {
             wait_queue_wake_all(&p->read_wq);
+            io_event_notify();
         }
     } else {
         p->readers--;
         if (p->readers == 0) {
             wait_queue_wake_all(&p->write_wq);
+            io_event_notify();
         }
     }
 
@@ -1657,6 +1803,30 @@ static int pipe_close(struct vfs_node *node, struct file *f)
         kfree(node);
     }
     return 0;
+}
+
+static int pipe_poll(struct vfs_node *node, short events, short *revents)
+{
+    struct pipe *p = (struct pipe *)node->data;
+    if (p == 0) return -EINVAL;
+
+    short ready = 0;
+    if ((events & 0x0001) && (p->count > 0 || p->writers == 0)) {
+        ready |= 0x0001;
+    }
+    if ((events & 0x0004) && p->readers > 0 && p->count < PIPE_BUF_SIZE) {
+        ready |= 0x0004;
+    }
+    if ((events & 0x0008) && p->writers == 0 && p->count == 0) {
+        ready |= 0x0008;
+    }
+    if ((events & 0x0010) && p->readers == 0) {
+        ready |= 0x0010;
+    }
+    if (revents != 0) {
+        *revents = ready;
+    }
+    return ready != 0 ? 1 : 0;
 }
 
 int64_t sys_pipe2(struct syscall_frame *frame)
@@ -1686,6 +1856,7 @@ int64_t sys_pipe2(struct syscall_frame *frame)
     read_node->type = VFS_TYPE_FILE;
     read_node->read = pipe_read;
     read_node->close = pipe_close;
+    read_node->poll = pipe_poll;
     read_node->data = p;
 
     struct vfs_node *write_node = kzalloc(sizeof(struct vfs_node));
@@ -1698,6 +1869,7 @@ int64_t sys_pipe2(struct syscall_frame *frame)
     write_node->type = VFS_TYPE_FILE;
     write_node->write = pipe_write;
     write_node->close = pipe_close;
+    write_node->poll = pipe_poll;
     write_node->data = p;
 
     int fd_r = alloc_fd(proc);
@@ -1818,7 +1990,15 @@ int64_t sys_poll(struct syscall_frame *frame)
             struct file *f = proc->files[fd];
             struct vfs_node *node = f->node;
 
-            if (node->read == pipe_read) {
+            if (node != 0 && node->poll != 0) {
+                short revents = 0;
+                int poll_rc = node->poll(node, kfds[i].events, &revents);
+                if (poll_rc < 0) {
+                    kfds[i].revents |= POLLNVAL;
+                } else {
+                    kfds[i].revents |= revents;
+                }
+            } else if (node->read == pipe_read) {
                 struct pipe *p = (struct pipe *)node->data;
                 if (p != 0) {
                     if (p->count > 0 && (kfds[i].events & POLLIN)) {
@@ -1828,22 +2008,20 @@ int64_t sys_poll(struct syscall_frame *frame)
                         kfds[i].revents |= POLLHUP;
                     }
                 }
-            }
-            else if (node->write == pipe_write) {
+            } else if (node->write == pipe_write) {
                 struct pipe *p = (struct pipe *)node->data;
                 if (p != 0) {
                     if (p->count < PIPE_BUF_SIZE && (kfds[i].events & POLLOUT)) {
                         kfds[i].revents |= POLLOUT;
-                      }
-                      if (p->readers == 0) {
-                          kfds[i].revents |= POLLERR;
-                      }
-                  }
-              }
-              else {
-                  if (kfds[i].events & POLLIN) kfds[i].revents |= POLLIN;
-                  if (kfds[i].events & POLLOUT) kfds[i].revents |= POLLOUT;
-              }
+                    }
+                    if (p->readers == 0) {
+                        kfds[i].revents |= POLLERR;
+                    }
+                }
+            } else {
+                if (kfds[i].events & POLLIN) kfds[i].revents |= POLLIN;
+                if (kfds[i].events & POLLOUT) kfds[i].revents |= POLLOUT;
+            }
 
               if (kfds[i].revents != 0) {
                   ready_count++;
@@ -1870,3 +2048,23 @@ int64_t sys_poll(struct syscall_frame *frame)
           task_sleep_ticks(1);
       }
   }
+
+/* ------------------------------------------------------------------ */
+/* sys_mount — mount a filesystem                                      */
+/* ------------------------------------------------------------------ */
+int64_t sys_mount(struct syscall_frame *frame)
+{
+    /* mount(source, target, fstype, mountflags, data) */
+    /* Stub: kernel-internal callers use vfs_mount() directly. */
+    (void)frame;
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* sys_umount2 — unmount a filesystem                                  */
+/* ------------------------------------------------------------------ */
+int64_t sys_umount2(struct syscall_frame *frame)
+{
+    (void)frame;
+    return 0;
+}

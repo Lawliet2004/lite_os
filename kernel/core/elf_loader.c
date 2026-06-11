@@ -297,16 +297,34 @@ int elf_load_into_process(struct process *proc, const void *elf_data, size_t elf
     if (interp_path != 0) {
         printk("ELF Loader: PT_INTERP=%s\n", interp_path);
         struct vfs_node *interp_node = vfs_lookup(interp_path);
-        if (interp_node == 0 || interp_node->data == 0) {
+        if (interp_node == 0) {
             printk("ELF Loader: interpreter not found\n");
             err_code = -ENOENT;
             goto error_cleanup;
         }
 
-        Elf64_Ehdr *interp_ehdr = (Elf64_Ehdr *)interp_node->data;
+        void *interp_buf = kmalloc(interp_node->size);
+        if (interp_buf == 0) {
+            err_code = -ENOMEM;
+            goto error_cleanup;
+        }
+        int read_bytes = 0;
+        if (interp_node->read) {
+            read_bytes = interp_node->read(interp_node, 0, interp_buf, interp_node->size);
+        } else {
+            read_bytes = -EIO;
+        }
+        if (read_bytes < 0 || (size_t)read_bytes != interp_node->size) {
+            kfree(interp_buf);
+            err_code = -EIO;
+            goto error_cleanup;
+        }
+
+        Elf64_Ehdr *interp_ehdr = (Elf64_Ehdr *)interp_buf;
         if (interp_ehdr->e_ident[EI_MAG0] != ELFMAG0 ||
             interp_ehdr->e_ident[EI_CLASS] != ELFCLASS64) {
             printk("ELF Loader: invalid interpreter ELF\n");
+            kfree(interp_buf);
             err_code = -ENOEXEC;
             goto error_cleanup;
         }
@@ -315,7 +333,7 @@ int elf_load_into_process(struct process *proc, const void *elf_data, size_t elf
         interp_load_base = (max_vaddr + 0x1fffffULL) & ~0x1fffffULL;
         if (interp_load_base == 0) interp_load_base = 0x1000000ULL;
 
-        Elf64_Phdr *interp_phdrs = (Elf64_Phdr *)((uint8_t *)interp_node->data + interp_ehdr->e_phoff);
+        Elf64_Phdr *interp_phdrs = (Elf64_Phdr *)((uint8_t *)interp_buf + interp_ehdr->e_phoff);
         for (int i = 0; i < interp_ehdr->e_phnum; i++) {
             Elf64_Phdr *phdr = &interp_phdrs[i];
             if (phdr->p_type != PT_LOAD) continue;
@@ -336,7 +354,7 @@ int elf_load_into_process(struct process *proc, const void *elf_data, size_t elf
                     vmm_protect(new_space, vaddr, flags);
                 } else {
                     phys = pmm_alloc_page();
-                    if (phys == 0) { err_code = -ENOMEM; goto error_cleanup; }
+                    if (phys == 0) { kfree(interp_buf); err_code = -ENOMEM; goto error_cleanup; }
                     vmm_map(new_space, vaddr, phys, flags);
                     memset(phys_to_virt(phys), 0, 4096);
                 }
@@ -354,7 +372,7 @@ int elf_load_into_process(struct process *proc, const void *elf_data, size_t elf
                     size_t file_offset = phdr->p_offset + (overlap_start - seg_vaddr);
                     size_t page_offset = overlap_start - page_vaddr_start;
                     void *dest = (uint8_t *)phys_to_virt(phys) + page_offset;
-                    const void *src = (const uint8_t *)interp_node->data + file_offset;
+                    const void *src = (const uint8_t *)interp_buf + file_offset;
                     memcpy(dest, src, copy_len);
                 }
             }
@@ -362,6 +380,7 @@ int elf_load_into_process(struct process *proc, const void *elf_data, size_t elf
         interp_base = interp_load_base;
         final_entry = interp_load_base + interp_ehdr->e_entry;
         printk("ELF Loader: interpreter base=%llx entry=%llx\n", interp_load_base, final_entry);
+        kfree(interp_buf);
     }
 
     /* Calculate phdr address (where first PT_LOAD maps the phdrs) */

@@ -1,0 +1,27 @@
+#!/bin/sh
+
+PIDFILE="/run/http_server.pid"
+PROG="/usr/sbin/http_server"
+
+case "$1" in
+    start)
+        echo "Starting http_server..."
+        $PROG &
+        touch $PIDFILE
+        ;;
+    stop)
+        echo "Stopping http_server..."
+        rm -f $PIDFILE
+        ;;
+    status)
+        if [ -f "$PIDFILE" ]; then
+            echo "http_server is running"
+        else
+            echo "http_server is stopped"
+        fi
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|status}"
+        exit 1
+        ;;
+esac

@@ -20,3 +20,11 @@ struct block_device *block_device_get(const char *name)
     }
     return 0;
 }
+
+void block_devices_reregister_all(void)
+{
+    extern void vfs_register_block_device(struct block_device *dev);
+    for (int i = 0; i < block_device_count; i++) {
+        vfs_register_block_device(block_devices[i]);
+    }
+}

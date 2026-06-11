@@ -81,7 +81,14 @@ struct ext2_vfs_data {
 };
 
 static struct vfs_node *hda = 0;
+static struct vfs_node dummy_hda_node;
 static struct ext2_superblock current_sb;
+
+static int ext2_create(struct vfs_node *parent, const char *name, uint32_t mode, struct vfs_node **out_node);
+static int ext2_mkdir(struct vfs_node *parent, const char *name, uint32_t mode);
+static int ext2_unlink(struct vfs_node *parent, const char *name);
+static int ext2_rename(struct vfs_node *old_parent, const char *old_name, struct vfs_node *new_parent, const char *new_name);
+static int ext2_read_inode(uint32_t inode_num, struct ext2_inode *in);
 
 static bool ext2_is_valid_block(uint32_t blk)
 {
@@ -224,6 +231,122 @@ static uint32_t ext2_alloc_inode(uint8_t type)
     return 0;
 }
 
+static uint32_t ext2_get_block_num(struct ext2_vfs_data *evd, size_t block_idx)
+{
+    if (block_idx < 12) {
+        return evd->blocks[block_idx];
+    }
+    
+    // Singly indirect
+    size_t sib_idx = block_idx - 12;
+    if (sib_idx < 256) {
+        uint32_t sib = evd->blocks[12];
+        if (sib == 0 || !ext2_is_valid_block(sib)) return 0;
+        uint32_t ptrs[256];
+        if (hda->read(hda, (size_t)sib * 1024, ptrs, 1024) < 0) return 0;
+        return ptrs[sib_idx];
+    }
+    
+    // Doubly indirect
+    size_t dib_idx = sib_idx - 256;
+    size_t dib_outer = dib_idx / 256;
+    size_t dib_inner = dib_idx % 256;
+    if (dib_outer < 256) {
+        uint32_t dib = evd->blocks[13];
+        if (dib == 0 || !ext2_is_valid_block(dib)) return 0;
+        uint32_t ptrs_outer[256];
+        if (hda->read(hda, (size_t)dib * 1024, ptrs_outer, 1024) < 0) return 0;
+        uint32_t sib = ptrs_outer[dib_outer];
+        if (sib == 0 || !ext2_is_valid_block(sib)) return 0;
+        uint32_t ptrs_inner[256];
+        if (hda->read(hda, (size_t)sib * 1024, ptrs_inner, 1024) < 0) return 0;
+        return ptrs_inner[dib_inner];
+    }
+    
+    return 0;
+}
+
+static int ext2_set_block_num(struct ext2_vfs_data *evd, size_t block_idx, uint32_t blk)
+{
+    if (block_idx < 12) {
+        evd->blocks[block_idx] = blk;
+        struct ext2_inode in;
+        if (ext2_read_inode(evd->inode_num, &in) == 0) {
+            in.i_block[block_idx] = blk;
+            ext2_save_inode(evd->inode_num, &in);
+        }
+        return 0;
+    }
+    
+    // Singly indirect
+    size_t sib_idx = block_idx - 12;
+    if (sib_idx < 256) {
+        if (evd->blocks[12] == 0) {
+            uint32_t new_sib = ext2_alloc_block();
+            if (new_sib == 0) return -ENOSPC;
+            evd->blocks[12] = new_sib;
+            uint8_t zero[1024];
+            memset(zero, 0, 1024);
+            hda->write(hda, (size_t)new_sib * 1024, zero, 1024);
+            
+            struct ext2_inode in;
+            if (ext2_read_inode(evd->inode_num, &in) == 0) {
+                in.i_block[12] = new_sib;
+                ext2_save_inode(evd->inode_num, &in);
+            }
+        }
+        uint32_t sib = evd->blocks[12];
+        uint32_t ptrs[256];
+        if (hda->read(hda, (size_t)sib * 1024, ptrs, 1024) < 0) return -EIO;
+        ptrs[sib_idx] = blk;
+        if (hda->write(hda, (size_t)sib * 1024, ptrs, 1024) < 0) return -EIO;
+        return 0;
+    }
+    
+    // Doubly indirect
+    size_t dib_idx = sib_idx - 256;
+    size_t dib_outer = dib_idx / 256;
+    size_t dib_inner = dib_idx % 256;
+    if (dib_outer < 256) {
+        if (evd->blocks[13] == 0) {
+            uint32_t new_dib = ext2_alloc_block();
+            if (new_dib == 0) return -ENOSPC;
+            evd->blocks[13] = new_dib;
+            uint8_t zero[1024];
+            memset(zero, 0, 1024);
+            hda->write(hda, (size_t)new_dib * 1024, zero, 1024);
+            
+            struct ext2_inode in;
+            if (ext2_read_inode(evd->inode_num, &in) == 0) {
+                in.i_block[13] = new_dib;
+                ext2_save_inode(evd->inode_num, &in);
+            }
+        }
+        uint32_t dib = evd->blocks[13];
+        uint32_t ptrs_outer[256];
+        if (hda->read(hda, (size_t)dib * 1024, ptrs_outer, 1024) < 0) return -EIO;
+        
+        if (ptrs_outer[dib_outer] == 0) {
+            uint32_t new_sib = ext2_alloc_block();
+            if (new_sib == 0) return -ENOSPC;
+            ptrs_outer[dib_outer] = new_sib;
+            uint8_t zero[1024];
+            memset(zero, 0, 1024);
+            hda->write(hda, (size_t)new_sib * 1024, zero, 1024);
+            if (hda->write(hda, (size_t)dib * 1024, ptrs_outer, 1024) < 0) return -EIO;
+        }
+        
+        uint32_t sib = ptrs_outer[dib_outer];
+        uint32_t ptrs_inner[256];
+        if (hda->read(hda, (size_t)sib * 1024, ptrs_inner, 1024) < 0) return -EIO;
+        ptrs_inner[dib_inner] = blk;
+        if (hda->write(hda, (size_t)sib * 1024, ptrs_inner, 1024) < 0) return -EIO;
+        return 0;
+    }
+    
+    return -EFBIG;
+}
+
 static int ext2_file_read(struct vfs_node *node, size_t offset, void *buf, size_t count)
 {
     if (hda == 0 || hda->read == 0) return -EIO;
@@ -236,8 +359,7 @@ static int ext2_file_read(struct vfs_node *node, size_t offset, void *buf, size_
     while (copy > 0) {
         size_t block_idx = (offset + bytes_copied) / 1024;
         size_t block_offset = (offset + bytes_copied) % 1024;
-        if (block_idx >= 12) break;
-        uint32_t blk = evd->blocks[block_idx];
+        uint32_t blk = ext2_get_block_num(evd, block_idx);
         if (blk == 0) break;
         if (!ext2_is_valid_block(blk)) break;
         size_t chunk = 1024 - block_offset;
@@ -256,30 +378,29 @@ int ext2_file_write(struct vfs_node *node, size_t offset, const void *buf, size_
     if (hda == 0 || hda->write == 0) return -EIO;
     struct ext2_vfs_data *evd = (struct ext2_vfs_data *)node->data;
     if (evd == 0) return -EIO;
-    if (offset + count > 12 * 1024) return -ENOSPC;
+    if (offset + count > 65804ULL * 1024) return -EFBIG;
     size_t bytes_written = 0;
     size_t write_limit = count;
     while (write_limit > 0) {
         size_t block_idx = (offset + bytes_written) / 1024;
         size_t block_offset = (offset + bytes_written) % 1024;
-        if (block_idx >= 12) break;
-        uint32_t blk = evd->blocks[block_idx];
+        uint32_t blk = ext2_get_block_num(evd, block_idx);
         if (blk == 0) {
             blk = ext2_alloc_block();
             if (blk == 0) return -ENOSPC;
-            evd->blocks[block_idx] = blk;
+            int r = ext2_set_block_num(evd, block_idx, blk);
+            if (r < 0) return r;
+            
             struct ext2_inode in;
-            uint8_t gd_buf[1024];
-            hda->read(hda, 2048, gd_buf, 1024);
-            struct ext2_group_desc *gd = (struct ext2_group_desc *)gd_buf;
-            uint32_t it_block = gd->bg_inode_table + ((evd->inode_num - 1) * 128) / 1024;
-            uint32_t it_offset = ((evd->inode_num - 1) * 128) % 1024;
-            uint8_t temp_it[1024];
-            hda->read(hda, (size_t)it_block * 1024, temp_it, 1024);
-            memcpy(&in, temp_it + it_offset, 128);
-            in.i_block[block_idx] = blk;
-            in.i_blocks = ((node->size + 1023) / 1024) * 2;
-            ext2_save_inode(evd->inode_num, &in);
+            if (ext2_read_inode(evd->inode_num, &in) == 0) {
+                size_t new_size = offset + bytes_written;
+                if (new_size > node->size) {
+                    node->size = new_size;
+                    in.i_size = (uint32_t)node->size;
+                }
+                in.i_blocks = ((node->size + 1023) / 1024) * 2;
+                ext2_save_inode(evd->inode_num, &in);
+            }
         }
         size_t chunk = 1024 - block_offset;
         if (chunk > write_limit) chunk = write_limit;
@@ -293,16 +414,11 @@ int ext2_file_write(struct vfs_node *node, size_t offset, const void *buf, size_
     if (offset + bytes_written > node->size) {
         node->size = offset + bytes_written;
         struct ext2_inode in;
-        uint8_t gd_buf[1024];
-        hda->read(hda, 2048, gd_buf, 1024);
-        struct ext2_group_desc *gd = (struct ext2_group_desc *)gd_buf;
-        uint32_t it_block = gd->bg_inode_table + ((evd->inode_num - 1) * 128) / 1024;
-        uint32_t it_offset = ((evd->inode_num - 1) * 128) % 1024;
-        uint8_t temp_it[1024];
-        hda->read(hda, (size_t)it_block * 1024, temp_it, 1024);
-        memcpy(&in, temp_it + it_offset, 128);
-        in.i_size = (uint32_t)node->size;
-        ext2_save_inode(evd->inode_num, &in);
+        if (ext2_read_inode(evd->inode_num, &in) == 0) {
+            in.i_size = (uint32_t)node->size;
+            in.i_blocks = ((node->size + 1023) / 1024) * 2;
+            ext2_save_inode(evd->inode_num, &in);
+        }
     }
     
     // Flush to disk
@@ -316,28 +432,63 @@ int ext2_file_write(struct vfs_node *node, size_t offset, const void *buf, size_
 
 int ext2_truncate(struct vfs_node *node, size_t new_size)
 {
-    if (new_size != 0) return -ENOTSUP;
-    node->size = 0;
     struct ext2_vfs_data *evd = (struct ext2_vfs_data *)node->data;
-    if (evd && hda && hda->write) {
-        for (int i = 0; i < 12; i++) {
-            if (evd->blocks[i] != 0) {
-                ext2_free_block(evd->blocks[i]);
-                evd->blocks[i] = 0;
+    if (evd == 0) return -EIO;
+    
+    if (new_size < node->size) {
+        size_t old_blocks = (node->size + 1023) / 1024;
+        size_t new_blocks = (new_size + 1023) / 1024;
+        
+        for (size_t b = new_blocks; b < old_blocks; b++) {
+            uint32_t blk = ext2_get_block_num(evd, b);
+            if (blk != 0) {
+                ext2_free_block(blk);
+                ext2_set_block_num(evd, b, 0);
             }
         }
-        struct ext2_inode in;
-        uint8_t gd_buf[1024];
-        hda->read(hda, 2048, gd_buf, 1024);
-        struct ext2_group_desc *gd = (struct ext2_group_desc *)gd_buf;
-        uint32_t it_block = gd->bg_inode_table + ((evd->inode_num - 1) * 128) / 1024;
-        uint32_t it_offset = ((evd->inode_num - 1) * 128) % 1024;
-        uint8_t temp_it[1024];
-        hda->read(hda, (size_t)it_block * 1024, temp_it, 1024);
-        memcpy(&in, temp_it + it_offset, 128);
-        in.i_size = 0;
+        
+        if (new_blocks <= 12 && evd->blocks[12] != 0) {
+            ext2_free_block(evd->blocks[12]);
+            evd->blocks[12] = 0;
+            struct ext2_inode in;
+            if (ext2_read_inode(evd->inode_num, &in) == 0) {
+                in.i_block[12] = 0;
+                ext2_save_inode(evd->inode_num, &in);
+            }
+        }
+        if (new_blocks <= 268 && evd->blocks[13] != 0) {
+            uint32_t dib = evd->blocks[13];
+            uint32_t ptrs_outer[256];
+            if (hda->read(hda, (size_t)dib * 1024, ptrs_outer, 1024) >= 0) {
+                for (int i = 0; i < 256; i++) {
+                    if (ptrs_outer[i] != 0) {
+                        ext2_free_block(ptrs_outer[i]);
+                    }
+                }
+            }
+            ext2_free_block(dib);
+            evd->blocks[13] = 0;
+            struct ext2_inode in;
+            if (ext2_read_inode(evd->inode_num, &in) == 0) {
+                in.i_block[13] = 0;
+                ext2_save_inode(evd->inode_num, &in);
+            }
+        }
+    }
+    
+    node->size = new_size;
+    struct ext2_inode in;
+    if (ext2_read_inode(evd->inode_num, &in) == 0) {
+        in.i_size = (uint32_t)new_size;
+        in.i_blocks = ((node->size + 1023) / 1024) * 2;
         ext2_save_inode(evd->inode_num, &in);
     }
+    
+    if (hda && hda->data) {
+        struct block_device *dev = (struct block_device *)hda->data;
+        if (dev->flush) dev->flush(dev);
+    }
+    
     return 0;
 }
 
@@ -406,11 +557,6 @@ static int ext2_add_entry(struct vfs_node *parent, const char *name, uint32_t in
     hda->write(hda, (size_t)block * 1024, dir_buf, 1024);
     return 0;
 }
-
-static int ext2_create(struct vfs_node *parent, const char *name, uint32_t mode, struct vfs_node **out_node);
-static int ext2_mkdir(struct vfs_node *parent, const char *name, uint32_t mode);
-static int ext2_unlink(struct vfs_node *parent, const char *name);
-static int ext2_rename(struct vfs_node *old_parent, const char *old_name, struct vfs_node *new_parent, const char *new_name);
 
 static int ext2_create(struct vfs_node *parent, const char *name, uint32_t mode, struct vfs_node **out_node)
 {
@@ -658,9 +804,30 @@ static int ext2_rename(struct vfs_node *old_parent, const char *old_name, struct
     int r = ext2_add_entry(new_parent, new_name, target_inode, target_type);
     if (r != 0) return r;
 
-    // Remove from old directory (just zero the inode)
-    target_de->inode = 0;
-    hda->write(hda, (size_t)old_block * 1024, old_dir_buf, 1024);
+    // Remove from old directory: reload old directory block in case old_parent and new_parent share the same block
+    hda->read(hda, (size_t)old_block * 1024, old_dir_buf, 1024);
+
+    // Find the old target entry again to zero it
+    offset = 0;
+    target_de = 0;
+    while (offset < 1024) {
+        struct ext2_dir_entry_2 *de = (struct ext2_dir_entry_2 *)(old_dir_buf + offset);
+        if (de->rec_len < 8) break;
+        if (de->inode == target_inode) {
+            size_t nlen = de->name_len < 255 ? de->name_len : 255;
+            if (nlen == strlen(old_name) && memcmp(de->name, old_name, nlen) == 0) {
+                target_de = de;
+                break;
+            }
+        }
+        if (offset + de->rec_len >= 1024) break;
+        offset += de->rec_len;
+    }
+
+    if (target_de != 0) {
+        target_de->inode = 0;
+        hda->write(hda, (size_t)old_block * 1024, old_dir_buf, 1024);
+    }
 
     if (hda && hda->data) {
         struct block_device *dev = (struct block_device *)hda->data;
@@ -669,16 +836,314 @@ static int ext2_rename(struct vfs_node *old_parent, const char *old_name, struct
     return 0;
 }
 
+static void get_node_path(struct vfs_node *node, char *buf, size_t max_len)
+{
+    struct vfs_node *root = vfs_get_root();
+    if (node == 0 || node == root) {
+        buf[0] = '\0';
+        return;
+    }
+    char temp[512];
+    get_node_path(node->parent, temp, sizeof(temp));
+    if (temp[0] == '\0') {
+        if (strlen(node->name) + 2 <= max_len) {
+            strcpy(buf, "/");
+            strcat(buf, node->name);
+        }
+    } else {
+        if (strlen(temp) + strlen(node->name) + 2 <= max_len) {
+            strcpy(buf, temp);
+            strcat(buf, "/");
+            strcat(buf, node->name);
+        }
+    }
+}
+
+static int ext2_read_inode(uint32_t inode_num, struct ext2_inode *in)
+{
+    if (hda == 0 || hda->read == 0) return -EIO;
+    if (!ext2_is_valid_inode(inode_num)) return -EINVAL;
+    uint8_t gd_buf[1024];
+    hda->read(hda, 2048, gd_buf, 1024);
+    struct ext2_group_desc *gd = (struct ext2_group_desc *)gd_buf;
+    if (!ext2_is_valid_block(gd->bg_inode_table)) return -EIO;
+    uint32_t block = gd->bg_inode_table + ((inode_num - 1) * 128) / 1024;
+    uint32_t offset = ((inode_num - 1) * 128) % 1024;
+    if (!ext2_is_valid_block(block)) return -EIO;
+    uint8_t temp[1024];
+    hda->read(hda, (size_t)block * 1024, temp, 1024);
+    memcpy(in, temp + offset, 128);
+    return 0;
+}
+
+static void ext2_scan_directory(struct vfs_node *parent, uint32_t inode_num)
+{
+    struct ext2_inode in;
+    if (ext2_read_inode(inode_num, &in) != 0) return;
+    for (int b = 0; b < 12; b++) {
+        uint32_t block = in.i_block[b];
+        if (block == 0) continue;
+        if (!ext2_is_valid_block(block)) continue;
+        uint8_t dir_buf[1024];
+        if (hda->read(hda, (size_t)block * 1024, dir_buf, 1024) < 0) continue;
+        uint32_t offset = 0;
+        while (offset < 1024) {
+            struct ext2_dir_entry_2 *de = (struct ext2_dir_entry_2 *)(dir_buf + offset);
+            if (de->rec_len < 8) break;
+            if (de->inode != 0 && de->name_len > 0) {
+                char name[256];
+                size_t nlen = de->name_len < 255 ? de->name_len : 255;
+                memcpy(name, de->name, nlen);
+                name[nlen] = '\0';
+                if (strcmp(name, ".") != 0 && strcmp(name, "..") != 0) {
+                    struct ext2_inode child_in;
+                    if (ext2_read_inode(de->inode, &child_in) == 0) {
+                        char parent_path[512];
+                        get_node_path(parent, parent_path, sizeof(parent_path));
+                        char full_path[512];
+                        if (parent_path[0] == '\0') {
+                            strcpy(full_path, "/");
+                            strcat(full_path, name);
+                        } else {
+                            strcpy(full_path, parent_path);
+                            strcat(full_path, "/");
+                            strcat(full_path, name);
+                        }
+                        uint32_t vfs_type = VFS_TYPE_FILE;
+                        if (de->file_type == 2) vfs_type = VFS_TYPE_DIR;
+                        vfs_create_file(full_path, vfs_type, child_in.i_size, 0);
+                        struct vfs_node *node = vfs_lookup(full_path);
+                        if (node != 0) {
+                            struct ext2_vfs_data *evd = kmalloc(sizeof(struct ext2_vfs_data));
+                            if (evd != 0) {
+                                evd->inode_num = de->inode;
+                                for (int k = 0; k < 15; k++) evd->blocks[k] = child_in.i_block[k];
+                                node->data = evd;
+                                if (vfs_type == VFS_TYPE_FILE) {
+                                    node->read = ext2_file_read;
+                                    node->write = ext2_file_write;
+                                    node->truncate = ext2_truncate;
+                                } else {
+                                    node->readdir = ext2_readdir;
+                                    ext2_scan_directory(node, de->inode);
+                                }
+                            }
+                        }
+                        printk("ext2: found %s (inode %u, size %u)\n", full_path, de->inode, (uint32_t)child_in.i_size);
+                    }
+                }
+            }
+            offset += de->rec_len;
+        }
+    }
+}
+
+static void ext2_setup_callbacks(struct vfs_node *node)
+{
+    if (node == 0) return;
+    if (node->type == VFS_TYPE_DIR) {
+        // Find if this is a top-level virtual folder (parent is root)
+        extern struct vfs_node *vfs_get_root(void);
+        if (node->parent == vfs_get_root() && (
+            strcmp(node->name, "dev") == 0 ||
+            strcmp(node->name, "proc") == 0 ||
+            strcmp(node->name, "sys") == 0 ||
+            strcmp(node->name, "tmp") == 0 ||
+            strcmp(node->name, "run") == 0)) {
+            
+            struct vfs_node *child = node->children;
+            while (child != 0) {
+                ext2_setup_callbacks(child);
+                child = child->next;
+            }
+            return;
+        }
+
+        node->create = ext2_create;
+        node->mkdir = ext2_mkdir;
+        node->unlink = ext2_unlink;
+        node->rename = ext2_rename;
+        struct vfs_node *child = node->children;
+        while (child != 0) {
+            ext2_setup_callbacks(child);
+            child = child->next;
+        }
+    }
+}
+
+static char *next_token(char **str)
+{
+    char *p = *str;
+    while (*p == ' ' || *p == '\t') p++;
+    if (*p == '\0') return 0;
+    char *start = p;
+    while (*p != ' ' && *p != '\t' && *p != '\0') p++;
+    if (*p != '\0') {
+        *p = '\0';
+        *str = p + 1;
+    } else {
+        *str = p;
+    }
+    return start;
+}
+
+bool ext2_mount_device(const char *dev_path, const char *mount_path)
+{
+    struct vfs_node *dev_node = vfs_lookup(dev_path);
+    if (dev_node == 0) {
+        printk("ext2: device %s not found\n", dev_path);
+        return false;
+    }
+    uint8_t sb_buf[1024];
+    if (dev_node->read(dev_node, 1024, sb_buf, 1024) < 0) {
+        printk("ext2: failed to read superblock from %s\n", dev_path);
+        return false;
+    }
+    struct ext2_superblock *sb = (struct ext2_superblock *)sb_buf;
+    if (sb->s_magic != EXT2_SUPER_MAGIC) {
+        printk("ext2: invalid magic on %s\n", dev_path);
+        return false;
+    }
+
+    // Create mountpoint directory if not exists
+    vfs_create_file(mount_path, VFS_TYPE_DIR, 0, 0);
+    struct vfs_node *mount_node = vfs_lookup(mount_path);
+    if (!mount_node) {
+        printk("ext2: failed to create mount point %s\n", mount_path);
+        return false;
+    }
+
+    struct ext2_vfs_data *revd = kzalloc(sizeof(struct ext2_vfs_data));
+    if (!revd) return false;
+
+    struct ext2_inode root_in;
+    if (ext2_read_inode(2, &root_in) == 0) {
+        revd->inode_num = 2;
+        for (int k = 0; k < 15; k++) revd->blocks[k] = root_in.i_block[k];
+        mount_node->data = revd;
+        mount_node->readdir = ext2_readdir;
+        ext2_scan_directory(mount_node, 2);
+        ext2_setup_callbacks(mount_node);
+        printk("ext2: mounted %s to %s successfully\n", dev_path, mount_path);
+        return true;
+    }
+    kfree(revd);
+    return false;
+}
+
+void vfs_parse_fstab_and_mount(void)
+{
+    extern const char *kernel_get_cmdline_arg(const char *arg_name);
+    const char *root_dev = kernel_get_cmdline_arg("root");
+
+    struct vfs_node *f = vfs_lookup("/etc/fstab");
+    if (!f) return;
+
+    char *buf = kmalloc(f->size + 1);
+    if (!buf) return;
+    int read_bytes = f->read(f, 0, buf, f->size);
+    if (read_bytes < 0) {
+        kfree(buf);
+        return;
+    }
+    buf[read_bytes] = '\0';
+
+    char *line = buf;
+    while (*line != '\0') {
+        char *end = line;
+        while (*end != '\n' && *end != '\0') end++;
+        bool is_last = (*end == '\0');
+        *end = '\0';
+
+        char *p = line;
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p != '#' && *p != '\0') {
+            char *str_ptr = p;
+            char *dev = next_token(&str_ptr);
+            char *mp = next_token(&str_ptr);
+            char *fstype = next_token(&str_ptr);
+            if (dev && mp && fstype) {
+                // If it is not root mount and device is not the root device
+                if (strcmp(mp, "/") != 0 && strcmp(dev, root_dev ? root_dev : "") != 0) {
+                    printk("fstab: mounting %s on %s type %s\n", dev, mp, fstype);
+                    if (strcmp(fstype, "ext2") == 0) {
+                        ext2_mount_device(dev, mp);
+                    }
+                }
+            }
+        }
+
+        if (is_last) break;
+        line = end + 1;
+    }
+    kfree(buf);
+}
+
 void ext2_init(void)
 {
+    extern const char *kernel_get_cmdline_arg(const char *arg_name);
+    const char *root_dev_arg = kernel_get_cmdline_arg("root");
+    char root_dev_buf[128];
+    root_dev_buf[0] = '\0';
+    if (root_dev_arg) {
+        strcpy(root_dev_buf, root_dev_arg);
+    }
+    const char *root_dev = root_dev_buf[0] ? root_dev_buf : 0;
+    const char *root_fstype = kernel_get_cmdline_arg("rootfstype");
+
+    if (root_dev != 0 && (root_fstype == 0 || strcmp(root_fstype, "ext2") == 0)) {
+        struct vfs_node *dev_node = vfs_lookup(root_dev);
+        if (dev_node != 0) {
+            uint8_t sb_buf[1024];
+            if (dev_node->read(dev_node, 1024, sb_buf, 1024) >= 0) {
+                struct ext2_superblock *sb = (struct ext2_superblock *)sb_buf;
+                if (sb->s_magic == EXT2_SUPER_MAGIC) {
+                    dummy_hda_node = *dev_node;
+                    hda = &dummy_hda_node;
+                    current_sb = *sb;
+
+                    vfs_clear_node_children(vfs_get_root());
+
+                    struct ext2_vfs_data *revd = kzalloc(sizeof(struct ext2_vfs_data));
+                    if (revd) {
+                        struct ext2_inode root_in;
+                        if (ext2_read_inode(2, &root_in) == 0) {
+                            revd->inode_num = 2;
+                            for (int k = 0; k < 15; k++) revd->blocks[k] = root_in.i_block[k];
+                            struct vfs_node *vfs_root = vfs_get_root();
+                            vfs_root->data = revd;
+                            vfs_root->readdir = ext2_readdir;
+                            ext2_scan_directory(vfs_root, 2);
+                            ext2_setup_callbacks(vfs_root);
+                        }
+                    }
+
+                    vfs_setup_pseudo_filesystems();
+
+                    extern void block_devices_reregister_all(void);
+                    block_devices_reregister_all();
+
+                    printk("ext2: successfully mounted root (/) from %s\n", root_dev);
+
+                    vfs_create_symlink(".", "/persist");
+                    vfs_parse_fstab_and_mount();
+                    return;
+                }
+            }
+        }
+        printk("ext2: failed to mount root from %s. Falling back to initramfs.\n", root_dev);
+    }
+
     const char *devs[] = { "/dev/hda", "/dev/hdb", "/dev/hdc", "/dev/hdd" };
     for (int i = 0; i < 4; i++) {
-        hda = vfs_lookup(devs[i]);
-        if (hda == 0) continue;
+        struct vfs_node *dev_node = vfs_lookup(devs[i]);
+        if (dev_node == 0) continue;
         uint8_t sb_buf[1024];
-        if (hda->read(hda, 1024, sb_buf, 1024) < 0) continue;
+        if (dev_node->read(dev_node, 1024, sb_buf, 1024) < 0) continue;
         struct ext2_superblock *sb = (struct ext2_superblock *)sb_buf;
         if (sb->s_magic == EXT2_SUPER_MAGIC) {
+            dummy_hda_node = *dev_node;
+            hda = &dummy_hda_node;
             current_sb = *sb;
             printk("ext2: valid magic found on %s, mounting /persist\n", devs[i]);
             goto found;
@@ -701,87 +1166,19 @@ void ext2_init(void)
 found:
     vfs_create_file("/persist", VFS_TYPE_DIR, 0, 0);
     struct vfs_node *ext2_root = vfs_lookup("/persist");
-    uint8_t gd_buf[1024];
-    hda->read(hda, 2048, gd_buf, 1024);
-    struct ext2_group_desc *gd = (struct ext2_group_desc *)gd_buf;
-    uint8_t it_buf[8192];
-    hda->read(hda, (size_t)gd->bg_inode_table * 1024, it_buf, 8192);
-    struct ext2_inode *inodes = (struct ext2_inode *)it_buf;
-    struct ext2_inode *root_in = &inodes[2 - 1];
-    uint32_t root_block = root_in->i_block[0];
     if (ext2_root) {
         struct ext2_vfs_data *revd = kzalloc(sizeof(struct ext2_vfs_data));
         if (revd) {
-            revd->inode_num = 2;
-            revd->blocks[0] = root_block;
-            ext2_root->data = revd;
-        }
-        ext2_root->readdir = ext2_readdir;
-    }
-    if (root_block == 0) return;
-    uint8_t dir_buf[1024];
-    hda->read(hda, (size_t)root_block * 1024, dir_buf, 1024);
-    uint32_t offset = 0;
-    while (offset < 1024) {
-        struct ext2_dir_entry_2 *de = (struct ext2_dir_entry_2 *)(dir_buf + offset);
-        if (de->rec_len < 8) break;
-        if (de->inode != 0 && de->name_len > 0) {
-            char name[256];
-            size_t nlen = de->name_len < 255 ? de->name_len : 255;
-            memcpy(name, de->name, nlen);
-            name[nlen] = '\0';
-            if (strcmp(name, ".") != 0 && strcmp(name, "..") != 0) {
-                if (de->inode <= 64) {
-                    struct ext2_inode *in = &inodes[de->inode - 1];
-                    char full_path[512];
-                    strcpy(full_path, "/persist/");
-                    strcat(full_path, name);
-                    uint32_t vfs_type = VFS_TYPE_FILE;
-                    if (de->file_type == 2) vfs_type = VFS_TYPE_DIR;
-                    vfs_create_file(full_path, vfs_type, in->i_size, 0);
-                    struct vfs_node *node = vfs_lookup(full_path);
-                    if (node != 0) {
-                        struct ext2_vfs_data *evd = kmalloc(sizeof(struct ext2_vfs_data));
-                        if (evd != 0) {
-                            evd->inode_num = de->inode;
-                            for (int k = 0; k < 15; k++) evd->blocks[k] = in->i_block[k];
-                            node->data = evd;
-                            if (vfs_type == VFS_TYPE_FILE) {
-                                node->read = ext2_file_read;
-                                node->write = ext2_file_write;
-                                node->truncate = ext2_truncate;
-                            } else {
-                                node->readdir = ext2_readdir;
-                                node->create = ext2_create;
-                                node->mkdir = ext2_mkdir;
-                                node->unlink = ext2_unlink;
-                                node->rename = ext2_rename;
-                            }
-                        }
-                    }
-                    printk("ext2: found /persist/%s (inode %u, size %u)\n", name, de->inode, (uint32_t)in->i_size);
-                }
+            struct ext2_inode root_in;
+            if (ext2_read_inode(2, &root_in) == 0) {
+                revd->inode_num = 2;
+                for (int k = 0; k < 15; k++) revd->blocks[k] = root_in.i_block[k];
+                ext2_root->data = revd;
+                ext2_root->readdir = ext2_readdir;
+                ext2_scan_directory(ext2_root, 2);
+                ext2_setup_callbacks(ext2_root);
             }
         }
-        offset += de->rec_len;
     }
-
-    if (ext2_root) {
-        ext2_root->create = ext2_create;
-        ext2_root->mkdir = ext2_mkdir;
-        ext2_root->unlink = ext2_unlink;
-        ext2_root->rename = ext2_rename;
-    }
-    const char *subdirs[] = { "/persist/bin", "/persist/lib", "/persist/tests" };
-    for (int k = 0; k < 3; k++) {
-        struct vfs_node *sd = vfs_lookup(subdirs[k]);
-        if (sd) {
-            sd->create = ext2_create;
-            sd->mkdir = ext2_mkdir;
-            sd->unlink = ext2_unlink;
-            sd->rename = ext2_rename;
-        }
-    }
-
     printk("ext2: mounted /persist from %s successfully\n", hda->name);
 }

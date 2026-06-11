@@ -43,8 +43,7 @@ def make_ext2(filename, source_dir):
             rel_path = os.path.relpath(host_path, source_dir)
             files_to_add.append((rel_path.replace('\\', '/'), host_path))
             
-    print(f"DEBUG make_ext2 files_to_add={files_to_add}")
-    print(f"DEBUG make_ext2 dirs_to_add={dirs_to_add}")
+
 
     with open(filename, 'r+b') as f:
         # 1. Superblock
@@ -105,7 +104,7 @@ def make_ext2(filename, source_dir):
             ensure_dir(d)
 
         for rel_path, host_path in files_to_add:
-            print(f"DEBUG make_ext2: rel_path='{rel_path}'")
+
             if rel_path == "hello.txt":
                 continue # Already added manually as Inode 11
                 
@@ -129,11 +128,42 @@ def make_ext2(filename, source_dir):
             f.seek(start_blk * BLOCK_SIZE)
             f.write(data)
             
-            f.seek(5 * BLOCK_SIZE + (ino - 1) * INODE_SIZE)
+            file_blocks = list(range(start_blk, start_blk + num_blks))
             blks_arr = [0] * 15
-            for j in range(min(num_blks, 12)): blks_arr[j] = start_blk + j
+            for j in range(min(num_blks, 12)):
+                blks_arr[j] = file_blocks[j]
+                
+            extra_blocks = 0
+            if num_blks > 12:
+                extra_blocks += 1
+                sib = alloc_block()
+                blks_arr[12] = sib
+                sib_blocks = file_blocks[12 : 12 + 256]
+                sib_data = struct.pack('<256L', *(sib_blocks + [0] * (256 - len(sib_blocks))))
+                f.seek(sib * BLOCK_SIZE)
+                f.write(sib_data)
+                
+            if num_blks > 12 + 256:
+                dib = alloc_block()
+                blks_arr[13] = dib
+                dib_blocks_all = file_blocks[12 + 256 :]
+                dib_ptrs = []
+                num_dib_sibs = (len(dib_blocks_all) + 255) // 256
+                extra_blocks += 1 + num_dib_sibs
+                for k in range(num_dib_sibs):
+                    chunk_blocks = dib_blocks_all[k * 256 : (k + 1) * 256]
+                    chunk_sib = alloc_block()
+                    dib_ptrs.append(chunk_sib)
+                    chunk_sib_data = struct.pack('<256L', *(chunk_blocks + [0] * (256 - len(chunk_blocks))))
+                    f.seek(chunk_sib * BLOCK_SIZE)
+                    f.write(chunk_sib_data)
+                dib_data = struct.pack('<256L', *(dib_ptrs + [0] * (256 - len(dib_ptrs))))
+                f.seek(dib * BLOCK_SIZE)
+                f.write(dib_data)
+
+            f.seek(5 * BLOCK_SIZE + (ino - 1) * INODE_SIZE)
             in_file = struct.pack('<HH LLLLL HH L L L 15L LLLL 12s',
-                0x81ED if "bin/" in rel_path else 0x81A4, 0, len(data), 0, 0, 0, 0, 0, 1, num_blks*2, 0, 0,
+                0x81ED if "bin/" in rel_path else 0x81A4, 0, len(data), 0, 0, 0, 0, 0, 1, (num_blks + extra_blocks)*2, 0, 0,
                 *blks_arr, 0, 0, 0, 0, b'\x00' * 12
             )
             f.write(in_file)
@@ -149,7 +179,7 @@ def make_ext2(filename, source_dir):
 
         # Write dir blocks
         for dirname, entries in dir_entries.items():
-            print(f"DEBUG make_ext2 dir '{dirname}': {entries}")
+
             blk = dir_blocks[dirname]
             f.seek(blk * BLOCK_SIZE)
             buf = bytearray()
@@ -162,6 +192,28 @@ def make_ext2(filename, source_dir):
                 buf += name.encode()
                 buf += b'\x00' * (rlen - 8 - nlen)
             f.write(buf)
+
+        # Write Block Bitmap (Block 3)
+        block_bitmap = bytearray(BLOCK_SIZE)
+        for b in range(next_block):
+            block_bitmap[b // 8] |= (1 << (b % 8))
+        f.seek(3 * BLOCK_SIZE)
+        f.write(block_bitmap)
+
+        # Write Inode Bitmap (Block 4)
+        inode_bitmap = bytearray(BLOCK_SIZE)
+        for ino in range(1, next_inode):
+            inode_bitmap[(ino - 1) // 8] |= (1 << ((ino - 1) % 8))
+        f.seek(4 * BLOCK_SIZE)
+        f.write(inode_bitmap)
+
+        # Write correct Group Descriptor at 2048
+        f.seek(2048)
+        free_blocks = 8192 - next_block
+        free_inodes = 128 - (next_inode - 1)
+        used_dirs = 1 + len(dirs_to_add)
+        gd = struct.pack('<LLLHHH', 3, 4, 5, free_blocks, free_inodes, used_dirs)
+        f.write(gd)
 
     print(f"Populated {filename} from {source_dir}")
 

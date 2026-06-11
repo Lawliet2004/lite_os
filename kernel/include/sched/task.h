@@ -40,7 +40,7 @@ enum task_mode {
 struct wait_queue;
 struct file;
 
-#define MAX_FILES_PER_PROCESS 64
+#define MAX_FILES_PER_PROCESS 256
 
 #define TASK_CWD_MAX 256
 
@@ -57,7 +57,7 @@ struct vma {
     bool valid;
 };
 
-#define VMA_MAX 32
+#define VMA_MAX 128
 
 struct process {
     uint64_t pid;
@@ -78,6 +78,14 @@ struct process {
 
     uint32_t pgid;
     uint32_t sid;
+
+    /* Credentials: real, effective, saved */
+    uint32_t ruid;  /* real UID */
+    uint32_t euid;  /* effective UID */
+    uint32_t suid;  /* saved set-UID */
+    uint32_t rgid;  /* real GID */
+    uint32_t egid;  /* effective GID */
+    uint32_t sgid;  /* saved set-GID */
 
     /* Heap (brk) tracking */
     uint64_t heap_start;  /* set by ELF loader: page-aligned end of BSS */
@@ -119,6 +127,7 @@ struct task {
     uint64_t total_ticks;   /* lifetime CPU ticks consumed */
     uint64_t last_run_tick; /* PIT tick when this task last ran (for starvation) */
     uint64_t sleep_until;   /* PIT tick deadline for timed sleep (0=wait queue) */
+    bool sleep_timed_out;   /* set by scheduler when timeout expires */
     uint32_t flags;         /* TASK_FLAG_* */
 
     /* Phase 16: Signal fields */

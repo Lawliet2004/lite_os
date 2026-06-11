@@ -297,6 +297,33 @@ struct timezone {
     int tz_dsttime;
 };
 
+/* select / epoll / socket message helpers */
+#define FD_SETSIZE 1024
+typedef struct fd_set {
+    uint64_t fds_bits[FD_SETSIZE / 64];
+} fd_set;
+
+struct epoll_event {
+    uint32_t events;
+    uint64_t data;
+};
+
+struct iovec {
+    void *iov_base;
+    size_t iov_len;
+};
+
+struct msghdr {
+    void *msg_name;
+    uint32_t msg_namelen;
+    uint32_t __pad0;
+    struct iovec *msg_iov;
+    size_t msg_iovlen;
+    void *msg_control;
+    size_t msg_controllen;
+    unsigned int msg_flags;
+};
+
 struct pollfd {
     int fd;
     short events;
@@ -319,11 +346,18 @@ int clock_gettime(int clockid, struct timespec *tp);
 int gettimeofday(struct timeval *tv, struct timezone *tz);
 int nanosleep(const struct timespec *req, struct timespec *rem);
 unsigned int sleep(unsigned int seconds);
+int select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds, struct timeval *timeout);
+int pselect6(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds, const struct timespec *timeout, const void *sigmask);
+int epoll_create1(int flags);
+int epoll_ctl(int epfd, int op, int fd, struct epoll_event *event);
+int epoll_wait(int epfd, struct epoll_event *events, int maxevents, int timeout);
 
 /* Memory */
 void *brk_syscall(unsigned long addr);
 void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset);
 int munmap(void *addr, size_t length);
+void *mremap(void *old_address, size_t old_size, size_t new_size, int flags, void *new_address);
+int madvise(void *addr, size_t length, int advice);
 
 #define PROT_NONE  0
 #define PROT_READ  1
@@ -371,11 +405,25 @@ struct sockaddr_in {
 };
 
 int socket(int domain, int type, int protocol);
+int socketpair(int domain, int type, int protocol, int sv[2]);
 int bind(int sockfd, const struct sockaddr *addr, socklen_t addrlen);
 int listen(int sockfd, int backlog);
 int accept(int sockfd, struct sockaddr *addr, socklen_t *addrlen);
 int connect(int sockfd, const struct sockaddr *addr, socklen_t addrlen);
 ssize_t sendto(int sockfd, const void *buf, size_t len, int flags, const struct sockaddr *dest_addr, socklen_t addrlen);
 ssize_t recvfrom(int sockfd, void *buf, size_t len, int flags, struct sockaddr *src_addr, socklen_t *addrlen);
+ssize_t sendmsg(int sockfd, const struct msghdr *msg, int flags);
+ssize_t recvmsg(int sockfd, struct msghdr *msg, int flags);
+
+/* Credentials / process controls */
+int getresuid(uint32_t *ruid, uint32_t *euid, uint32_t *suid);
+int setresuid(uint32_t ruid, uint32_t euid, uint32_t suid);
+int getresgid(uint32_t *rgid, uint32_t *egid, uint32_t *sgid);
+int setresgid(uint32_t rgid, uint32_t egid, uint32_t sgid);
+int prctl(int option, unsigned long arg2, unsigned long arg3, unsigned long arg4, unsigned long arg5);
+
+#define LINUX_REBOOT_CMD_RESTART    0x01234567
+#define LINUX_REBOOT_CMD_POWER_OFF  0x4321FEDC
+int reboot(int cmd);
 
 #endif

@@ -22,14 +22,16 @@
 #include <fs/vfs.h>
 #include <fs/initramfs.h>
 #include <net/net.h>
+#include <lib/string.h>
 
 static void sched_idle_loop(void)
 {
-    interrupts_enable();
     for (;;) {
+        interrupts_disable();
         if (sched_needs_resched()) {
             schedule();
         }
+        interrupts_enable();
         cpu_halt();
     }
 }
@@ -76,7 +78,7 @@ static uint64_t count_usable_memory_kib(void)
     return usable_bytes / 1024;
 }
 
-static void run_phase9_10_tests(void);
+// No run_phase9_10_tests forward declaration
 
 void kernel_main(void)
 {
@@ -106,6 +108,7 @@ void kernel_main(void)
     heap_self_test();
 
     vfs_init();
+    vfs_mount_table_init();
     printk("VFS: initialized\n");
     initramfs_init();
 
@@ -148,8 +151,10 @@ void kernel_main(void)
     syscall_table_init();
     syscall_init();
 
-    /* ---- Phase 9 & 10 Userspace Tests ---- */
-    run_phase9_10_tests();
+    /* ---- Distro Boot Modes / Userspace Init ---- */
+    interrupts_enable();
+    extern void run_init_process(void);
+    run_init_process();
 
     sched_idle_loop();
 }
@@ -163,39 +168,104 @@ extern uint8_t user_test_privileged_elf_end[];
 
 #include <kernel/elf_loader.h>
 
-static void run_phase9_10_tests(void)
+const char *kernel_get_cmdline_arg(const char *arg_name)
 {
-    int exit_code;
-    uint64_t pid;
+    extern volatile struct limine_kernel_file_request kernel_file_request;
+    if (kernel_file_request.response == 0 || kernel_file_request.response->kernel_file == 0) {
+        return 0;
+    }
+    const char *cmdline = kernel_file_request.response->kernel_file->cmdline;
+    if (cmdline == 0) {
+        return 0;
+    }
+    size_t name_len = strlen(arg_name);
+    const char *p = cmdline;
+    while (*p != '\0') {
+        if (strncmp(p, arg_name, name_len) == 0 && (p == cmdline || p[-1] == ' ')) {
+            const char *val_start = p + name_len;
+            if (*val_start == '=') {
+                val_start++;
+                static char val_buf[128];
+                int i = 0;
+                while (val_start[i] != '\0' && val_start[i] != ' ' && i < 127) {
+                    val_buf[i] = val_start[i];
+                    i++;
+                }
+                val_buf[i] = '\0';
+                return val_buf;
+            } else if (*val_start == ' ' || *val_start == '\0') {
+                return "";
+            }
+        }
+        p++;
+    }
+    return 0;
+}
 
-    printk("Phase 9 & 10: Running userspace tests\n");
+static const char *get_boot_mode(void)
+{
+    extern volatile struct limine_kernel_file_request kernel_file_request;
+    if (kernel_file_request.response != 0 && kernel_file_request.response->kernel_file != 0) {
+        const char *cmdline = kernel_file_request.response->kernel_file->cmdline;
+        if (cmdline) {
+            printk("Kernel cmdline: %s\n", cmdline);
+        }
+    }
+    const char *mode = kernel_get_cmdline_arg("bootmode");
+    if (mode == 0 || mode[0] == '\0') {
+        return "test"; // Default to test mode
+    }
+    if (strcmp(mode, "normal") == 0) return "normal";
+    if (strcmp(mode, "recovery") == 0) return "recovery";
+    if (strcmp(mode, "test") == 0) return "test";
+    return "test";
+}
 
-    // Test 1: load and execute test_read_kernel.elf
-    size_t size1 = (size_t)(user_test_read_kernel_elf_end - user_test_read_kernel_elf_start);
-    struct task *t1 = elf_load("test_read_kernel", user_test_read_kernel_elf_start, size1, 0, 0, 0);
-    if (t1 == 0) panic("Phase 9 & 10: Failed to load test_read_kernel.elf");
-    pid = t1->pid;
-    task_wait(pid, &exit_code);
-    printk("Phase 9 & 10: test_read_kernel terminated OK\n");
+void run_init_process(void)
+{
+    const char *mode = get_boot_mode();
+    printk("Starting init process in mode: %s\n", mode);
 
-    // Test 2: load and execute test_privileged.elf
-    size_t size2 = (size_t)(user_test_privileged_elf_end - user_test_privileged_elf_start);
-    struct task *t2 = elf_load("test_privileged", user_test_privileged_elf_start, size2, 0, 0, 0);
-    if (t2 == 0) panic("Phase 9 & 10: Failed to load test_privileged.elf");
-    pid = t2->pid;
-    task_wait(pid, &exit_code);
-    printk("Phase 9 & 10: test_privileged terminated OK\n");
+    if (strcmp(mode, "test") == 0) {
+        int exit_code;
+        uint64_t pid;
 
-    // Test 3: load and execute init.elf
-    size_t size3 = (size_t)(user_init_elf_end - user_init_elf_start);
-    char *argv[] = { "/bin/init", "test_arg", 0 };
-    struct task *t3 = elf_load("init", user_init_elf_start, size3, 2, argv, 0);
-    if (t3 == 0) panic("Phase 9 & 10: Failed to load init.elf");
-    pid = t3->pid;
-    task_wait(pid, &exit_code);
-    if (exit_code != 0) panic("Phase 9 & 10: init exited with %d", exit_code);
-    printk("Phase 9 & 10: init program exited with 0 OK\n");
+        printk("Phase 9 & 10: Running userspace tests\n");
 
-    printk("Test 22: PASSED\n");
-    printk("Test 23: PASSED\n"); // Compatibility with Makefile grep
+        // Test 1: load and execute test_read_kernel.elf
+        size_t size1 = (size_t)(user_test_read_kernel_elf_end - user_test_read_kernel_elf_start);
+        struct task *t1 = elf_load("test_read_kernel", user_test_read_kernel_elf_start, size1, 0, 0, 0);
+        if (t1 == 0) panic("Phase 9 & 10: Failed to load test_read_kernel.elf");
+        pid = t1->pid;
+        task_wait(pid, &exit_code);
+        printk("Phase 9 & 10: test_read_kernel terminated OK\n");
+
+        // Test 2: load and execute test_privileged.elf
+        size_t size2 = (size_t)(user_test_privileged_elf_end - user_test_privileged_elf_start);
+        struct task *t2 = elf_load("test_privileged", user_test_privileged_elf_start, size2, 0, 0, 0);
+        if (t2 == 0) panic("Phase 9 & 10: Failed to load test_privileged.elf");
+        pid = t2->pid;
+        task_wait(pid, &exit_code);
+        printk("Phase 9 & 10: test_privileged terminated OK\n");
+
+        // Test 3: load and execute init.elf
+        size_t size3 = (size_t)(user_init_elf_end - user_init_elf_start);
+        char *argv[] = { "/sbin/init", "test_arg", 0 };
+        struct task *t3 = elf_load("init", user_init_elf_start, size3, 2, argv, 0);
+        if (t3 == 0) panic("Phase 9 & 10: Failed to load init.elf");
+        pid = t3->pid;
+        task_wait(pid, &exit_code);
+        if (exit_code != 0) panic("Phase 9 & 10: init exited with %d", exit_code);
+        printk("Phase 9 & 10: init program exited with 0 OK\n");
+
+        printk("Test 22: PASSED\n");
+        printk("Test 23: PASSED\n"); // Compatibility with Makefile grep
+    } else {
+        // Recovery or Normal mode
+        size_t size3 = (size_t)(user_init_elf_end - user_init_elf_start);
+        char *argv[] = { "/sbin/init", (char *)mode, 0 };
+        struct task *t3 = elf_load("init", user_init_elf_start, size3, 2, argv, 0);
+        if (t3 == 0) panic("Failed to load init.elf");
+        printk("Init program spawned as PID %llu\n", t3->pid);
+    }
 }

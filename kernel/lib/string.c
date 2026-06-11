@@ -68,3 +68,13 @@ char *strcat(char *dest, const char *src)
     }
     return dest;
 }
+
+int strncmp(const char *s1, const char *s2, size_t n)
+{
+    for (size_t i = 0; i < n; i++) {
+        if (s1[i] != s2[i] || s1[i] == '\0') {
+            return (int)(unsigned char)s1[i] - (int)(unsigned char)s2[i];
+        }
+    }
+    return 0;
+}

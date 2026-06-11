@@ -23,8 +23,11 @@ struct wait_queue {
 void wait_queue_init(struct wait_queue *wq);
 void wait_queue_sleep(struct wait_queue *wq);
 void wait_queue_sleep_locked(struct wait_queue *wq);
+bool wait_queue_sleep_timeout(struct wait_queue *wq, uint64_t timeout_ticks);
 void wait_queue_wake_one(struct wait_queue *wq);
 void wait_queue_wake_all(struct wait_queue *wq);
 uint64_t wait_queue_count(const struct wait_queue *wq);
+struct wait_queue *wait_queue_io_event(void);
+void io_event_notify(void);
 
 #endif

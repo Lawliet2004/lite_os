@@ -13,7 +13,9 @@
 #include <fs/vfs.h>
 #include <stdint.h>
 #include <arch/x86_64/cpu.h>
+#include <arch/x86_64/io.h>
 #include <drivers/pit.h>
+#include <kernel/printk.h>
 
 
 /* ------------------------------------------------------------------ */
@@ -43,11 +45,11 @@ int64_t sys_getppid(struct syscall_frame *frame)
     return (int64_t)parent->pid;
 }
 
-/* We run as uid/gid 0 (root) for now — no multi-user support yet */
-int64_t sys_getuid(struct syscall_frame *frame)  { (void)frame; return 0; }
-int64_t sys_getgid(struct syscall_frame *frame)  { (void)frame; return 0; }
-int64_t sys_geteuid(struct syscall_frame *frame) { (void)frame; return 0; }
-int64_t sys_getegid(struct syscall_frame *frame) { (void)frame; return 0; }
+/* Read real/effective UID/GID from process credentials */
+int64_t sys_getuid(struct syscall_frame *frame)  { (void)frame; if(!current_task||!current_task->process) return 0; return (int64_t)current_task->process->ruid; }
+int64_t sys_getgid(struct syscall_frame *frame)  { (void)frame; if(!current_task||!current_task->process) return 0; return (int64_t)current_task->process->rgid; }
+int64_t sys_geteuid(struct syscall_frame *frame) { (void)frame; if(!current_task||!current_task->process) return 0; return (int64_t)current_task->process->euid; }
+int64_t sys_getegid(struct syscall_frame *frame) { (void)frame; if(!current_task||!current_task->process) return 0; return (int64_t)current_task->process->egid; }
 
 /* ------------------------------------------------------------------ */
 /* chdir / getcwd                                                       */
@@ -260,7 +262,18 @@ int64_t sys_kill(struct syscall_frame *frame)
     int sig = (int)frame->rsi;
 
     if (sig < 0 || sig >= 64) return -(int64_t)EINVAL;
-    if (pid <= 0) return -(int64_t)ENOSYS; // Only support killing specific PID > 0 for now
+    if (pid == 0) {
+        /* kill all in current process group */
+        if (sig != 0 && current_task && current_task->process)
+            task_send_signal_pgid(current_task->process->pgid, sig);
+        return 0;
+    }
+    if (pid < 0) {
+        /* kill process group -pid */
+        if (sig != 0)
+            task_send_signal_pgid((uint32_t)(-pid), sig);
+        return 0;
+    }
 
     struct process *proc = find_process((uint64_t)pid);
     if (proc == 0 || proc->main_thread == 0) {
@@ -728,4 +741,152 @@ int64_t sys_getsid(struct syscall_frame *frame)
     }
 
     return (int64_t)target->sid;
+}
+
+#define LINUX_REBOOT_MAGIC1         0xfee1dead
+#define LINUX_REBOOT_MAGIC2         672274793
+
+#define LINUX_REBOOT_CMD_RESTART    0x01234567
+#define LINUX_REBOOT_CMD_POWER_OFF  0x4321FEDC
+
+int64_t sys_reboot(struct syscall_frame *frame)
+{
+    uint64_t magic1 = frame->rdi;
+    uint64_t magic2 = frame->rsi;
+    uint64_t cmd = frame->rdx;
+
+    if (magic1 != LINUX_REBOOT_MAGIC1 || magic2 != LINUX_REBOOT_MAGIC2) {
+        return -(int64_t)EINVAL;
+    }
+
+    if (cmd == LINUX_REBOOT_CMD_RESTART) {
+        printk("Rebooting system...\n");
+        // Write to keyboard controller (port 0x64, reset CPU command 0xFE)
+        outb(0x64, 0xFE);
+        // Write to PCI reset register (port 0xCF9, value 0x06)
+        outb(0xCF9, 0x06);
+        
+        // Triple fault fallback
+        struct {
+            uint16_t limit;
+            uint64_t base;
+        } __attribute__((packed)) limit = {0, 0};
+        __asm__ volatile("lidt %0; int $3" : : "m"(limit));
+    } else if (cmd == LINUX_REBOOT_CMD_POWER_OFF) {
+        printk("Shutting down system...\n");
+        // QEMU poweroff (newer ACPI: write 0x2000 to port 0x604)
+        outw(0x604, 0x2000);
+        // VirtualBox / older QEMU: write 0x3400 to port 0x4004
+        outw(0x4004, 0x3400);
+        // QEMU debug exit fallback: write 0 to port 0xf4
+        outb(0xf4, 0x00);
+    } else {
+        return -(int64_t)EINVAL;
+    }
+
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* getresuid / setresuid / getresgid / setresgid                       */
+/* ------------------------------------------------------------------ */
+
+int64_t sys_getresuid(struct syscall_frame *frame)
+{
+    uint32_t *ruid = (uint32_t *)frame->rdi;
+    uint32_t *euid = (uint32_t *)frame->rsi;
+    uint32_t *suid = (uint32_t *)frame->rdx;
+    if (!current_task || !current_task->process) return -(int64_t)EPERM;
+    struct process *p = current_task->process;
+    if (ruid && copy_to_user(ruid, &p->ruid, sizeof(uint32_t)) != 0) return -(int64_t)EFAULT;
+    if (euid && copy_to_user(euid, &p->euid, sizeof(uint32_t)) != 0) return -(int64_t)EFAULT;
+    if (suid && copy_to_user(suid, &p->suid, sizeof(uint32_t)) != 0) return -(int64_t)EFAULT;
+    return 0;
+}
+
+int64_t sys_setresuid(struct syscall_frame *frame)
+{
+    uint32_t ruid = (uint32_t)frame->rdi;
+    uint32_t euid = (uint32_t)frame->rsi;
+    uint32_t suid = (uint32_t)frame->rdx;
+    if (!current_task || !current_task->process) return -(int64_t)EPERM;
+    struct process *p = current_task->process;
+    /* Only root (euid==0) can set arbitrary IDs */
+    if (p->euid != 0) return -(int64_t)EPERM;
+    if (ruid != (uint32_t)-1) p->ruid = ruid;
+    if (euid != (uint32_t)-1) p->euid = euid;
+    if (suid != (uint32_t)-1) p->suid = suid;
+    return 0;
+}
+
+int64_t sys_getresgid(struct syscall_frame *frame)
+{
+    uint32_t *rgid = (uint32_t *)frame->rdi;
+    uint32_t *egid = (uint32_t *)frame->rsi;
+    uint32_t *sgid = (uint32_t *)frame->rdx;
+    if (!current_task || !current_task->process) return -(int64_t)EPERM;
+    struct process *p = current_task->process;
+    if (rgid && copy_to_user(rgid, &p->rgid, sizeof(uint32_t)) != 0) return -(int64_t)EFAULT;
+    if (egid && copy_to_user(egid, &p->egid, sizeof(uint32_t)) != 0) return -(int64_t)EFAULT;
+    if (sgid && copy_to_user(sgid, &p->sgid, sizeof(uint32_t)) != 0) return -(int64_t)EFAULT;
+    return 0;
+}
+
+int64_t sys_setresgid(struct syscall_frame *frame)
+{
+    uint32_t rgid = (uint32_t)frame->rdi;
+    uint32_t egid = (uint32_t)frame->rsi;
+    uint32_t sgid = (uint32_t)frame->rdx;
+    if (!current_task || !current_task->process) return -(int64_t)EPERM;
+    struct process *p = current_task->process;
+    if (p->euid != 0) return -(int64_t)EPERM;
+    if (rgid != (uint32_t)-1) p->rgid = rgid;
+    if (egid != (uint32_t)-1) p->egid = egid;
+    if (sgid != (uint32_t)-1) p->sgid = sgid;
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* prctl                                                                */
+/* ------------------------------------------------------------------ */
+#define PR_SET_NAME      15
+#define PR_GET_NAME      16
+#define PR_SET_DUMPABLE   4
+#define PR_GET_DUMPABLE   3
+
+int64_t sys_prctl(struct syscall_frame *frame)
+{
+    int option = (int)frame->rdi;
+    unsigned long arg2 = (unsigned long)frame->rsi;
+
+    if (!current_task) return -(int64_t)EPERM;
+
+    switch (option) {
+    case PR_SET_NAME: {
+        char name[16];
+        if (copy_string_from_user(name, (const char *)arg2, 16) != 0)
+            return -(int64_t)EFAULT;
+        name[15] = '\0';
+        size_t len = strlen(name);
+        if (len >= TASK_NAME_MAX) len = TASK_NAME_MAX - 1;
+        memcpy(current_task->name, name, len + 1);
+        return 0;
+    }
+    case PR_GET_NAME: {
+        char name[16];
+        size_t len = strlen(current_task->name);
+        if (len > 15) len = 15;
+        memcpy(name, current_task->name, len);
+        name[len] = '\0';
+        if (copy_to_user((void *)arg2, name, 16) != 0)
+            return -(int64_t)EFAULT;
+        return 0;
+    }
+    case PR_SET_DUMPABLE:
+        return 0; /* accept silently */
+    case PR_GET_DUMPABLE:
+        return 1; /* always dumpable */
+    default:
+        return -(int64_t)EINVAL;
+    }
 }

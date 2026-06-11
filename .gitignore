@@ -16,9 +16,11 @@ graphify-out/
 
 # Local bootloader artifacts. See toolchain/README.md.
 toolchain/limine/
+toolchain/zig/
 
 # Local tool caches.
 .cache/
+.zig-global-cache/
 .zig-cache/
 zig-cache/
 

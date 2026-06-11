@@ -79,10 +79,10 @@ All syscall handlers return `int64_t`:
 | `getpid`          | 39  | ✅ Full   | |
 | `gettid`          | 186 | ✅ Full   | |
 | `getppid`         | 110 | ✅ Full   | |
-| `getuid`          | 102 | ✅ Stub   | always 0 |
-| `getgid`          | 104 | ✅ Stub   | always 0 |
-| `geteuid`         | 107 | ✅ Stub   | always 0 |
-| `getegid`         | 108 | ✅ Stub   | always 0 |
+| `getuid`          | 102 | ✅ Full   | returns real UID |
+| `getgid`          | 104 | ✅ Full   | returns real GID |
+| `geteuid`         | 107 | ✅ Full   | returns effective UID |
+| `getegid`         | 108 | ✅ Full   | returns effective GID |
 | `chdir`           | 80  | ✅ Full   | |
 | `getcwd`          | 79  | ✅ Full   | returns buf ptr on success |
 | `clone`           | 56  | ✅ Full   | CLONE_THREAD + CLONE_VM for threads; fork for process clone |
@@ -93,8 +93,8 @@ All syscall handlers return `int64_t`:
 | `get_robust_list` | 274 | ✅ Full   | |
 | `getrandom`       | 318 | ✅ Full   | XorShift PRNG (not cryptographic) |
 | `uname`           | 63  | ✅ Full   | sysname=LiteNix, machine=x86_64 |
-| `kill`            | 62  | ✅ Partial| PID > 0 only |
-| `rt_sigaction`    | 13  | ✅ Partial| global handler table, no delivery to user stack yet |
+| `kill`            | 62  | ✅ Partial| PID, current process group, and explicit process-group delivery |
+| `rt_sigaction`    | 13  | ✅ Partial| user-stack delivery implemented; full signal semantics still incomplete |
 | `rt_sigprocmask`  | 14  | ✅ Full   | SIG_BLOCK, SIG_UNBLOCK, SIG_SETMASK |
 | `clock_gettime`   | 228 | ✅ Full   | CLOCK_REALTIME, CLOCK_MONOTONIC (100 Hz PIT) |
 | `gettimeofday`    | 96  | ✅ Full   | |
@@ -113,6 +113,8 @@ All syscall handlers return `int64_t`:
 | `mmap`       | 9   | ✅ Full   | MAP_ANONYMOUS + MAP_PRIVATE with VMA demand paging; file-backed MAP_PRIVATE with COW page fault loading |
 | `munmap`     | 11  | ✅ Full   | unmaps + frees PMM pages, updates VMAs |
 | `mprotect`   | 10  | ✅ Full   | updates page flags and VMA records |
+| `mremap`     | 25  | ✅ Partial| shrink, in-place grow, and `MREMAP_MAYMOVE` |
+| `madvise`    | 28  | ✅ Partial| common no-op hints plus `MADV_DONTNEED` |
 
 ### Networking (`net/socket.c`)
 
@@ -125,6 +127,12 @@ All syscall handlers return `int64_t`:
 | `connect`  | 42  | ✅ Full   | |
 | `sendto`   | 44  | ✅ Full   | |
 | `recvfrom` | 45  | ✅ Full   | |
+| `sendmsg`  | 46  | ✅ Partial| basic iovec send, no ancillary data |
+| `recvmsg`  | 47  | ✅ Partial| basic iovec receive, no ancillary data |
+| `shutdown` | 48  | ✅ Full   | stream and socketpair shutdown |
+| `socketpair` | 53 | ✅ Partial| `AF_UNIX` `SOCK_STREAM` only |
+| `setsockopt` | 54 | ✅ Partial| `SOL_SOCKET` basics |
+| `getsockopt` | 55 | ✅ Partial| `SOL_SOCKET` basics |
 
 ---
 

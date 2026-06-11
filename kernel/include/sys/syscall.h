@@ -30,6 +30,7 @@
 #define ENFILE  23
 #define EMFILE  24
 #define ENOSPC  28
+#define EFBIG   27
 #define EPIPE   32
 #define ERANGE  34
 #define ENOSYS  38
@@ -44,11 +45,13 @@
 
 #define ENOTSOCK      88
 #define EDESTADDRREQ  89
+#define ENOPROTOOPT   92
 #define EOPNOTSUPP    95
 #define EAFNOSUPPORT  97
 #define EISCONN       106
 #define ENOTCONN      107
 #define ENOTSUP 95
+#define ECONNREFUSED  111
 
 /*
  * wait4 options and status macros — Linux ABI.
@@ -137,6 +140,7 @@
 #define SYS_nanosleep     35
 #define SYS_gettimeofday  96
 #define SYS_clock_gettime 228
+#define SYS_reboot        169
 
 #define SYS_setpgid       109
 #define SYS_getpgid       121
@@ -158,6 +162,26 @@
 #define SYS_fchmodat     268
 #define SYS_dup3         292
 #define SYS_renameat2    316
+
+/* Missing high-impact syscalls */
+#define SYS_mremap       25
+#define SYS_madvise      28
+#define SYS_select       23
+#define SYS_sendmsg      46
+#define SYS_recvmsg      47
+#define SYS_shutdown     48
+#define SYS_socketpair   53
+#define SYS_setsockopt   54
+#define SYS_getsockopt   55
+#define SYS_setresuid   117
+#define SYS_getresuid   118
+#define SYS_setresgid   119
+#define SYS_getresgid   120
+#define SYS_prctl       157
+#define SYS_epoll_wait  232
+#define SYS_epoll_ctl   233
+#define SYS_pselect6    270
+#define SYS_epoll_create1 291
 
 /*
  * fcntl commands
@@ -199,5 +223,8 @@ struct syscall_frame {
     uint64_t r15;
     uint64_t user_rsp; /* user RSP */
 };
+
+#define SYS_mount   165
+#define SYS_umount2 166
 
 #endif

@@ -1,6 +1,7 @@
 #include <net/net.h>
 #include <lib/string.h>
 #include <mm/heap.h>
+#include <kernel/printk.h>
 
 extern struct socket socket_table[];
 extern void net_ipv4_send(const uint8_t dest_ip[4], uint8_t proto, const void *payload, uint16_t len);
@@ -24,9 +25,9 @@ struct tcp_pseudo_hdr {
 
 void net_tcp_send_segment(struct socket *sock, uint8_t flags, const void *payload, uint16_t len)
 {
-    static uint8_t tcp_packet[1600];
     uint16_t tcp_len = sizeof(struct tcp_hdr) + len;
-    if (tcp_len > sizeof(tcp_packet)) return;
+    uint8_t *tcp_packet = kmalloc(tcp_len);
+    if (!tcp_packet) return;
 
     struct tcp_hdr *tcp = (struct tcp_hdr *)tcp_packet;
     tcp->src_port = swap16(sock->local_port);
@@ -45,19 +46,30 @@ void net_tcp_send_segment(struct socket *sock, uint8_t flags, const void *payloa
 
     // Compute TCP Checksum with pseudo-header
     struct tcp_pseudo_hdr phdr;
-    memcpy(phdr.src_ip, my_ip, 4);
+    if (sock->remote_ip[0] == 127) {
+        phdr.src_ip[0] = 127;
+        phdr.src_ip[1] = 0;
+        phdr.src_ip[2] = 0;
+        phdr.src_ip[3] = 1;
+    } else {
+        memcpy(phdr.src_ip, my_ip, 4);
+    }
     memcpy(phdr.dest_ip, sock->remote_ip, 4);
     phdr.reserved = 0;
     phdr.proto = IP_PROTO_TCP;
     phdr.tcp_len = swap16(tcp_len);
 
-    static uint8_t checksum_buffer[2000];
-    memcpy(checksum_buffer, &phdr, sizeof(phdr));
-    memcpy(checksum_buffer + sizeof(phdr), tcp_packet, tcp_len);
-
-    tcp->csum = ip_checksum(checksum_buffer, sizeof(phdr) + tcp_len);
+    uint8_t *checksum_buffer = kmalloc(sizeof(phdr) + tcp_len);
+    if (checksum_buffer) {
+        memcpy(checksum_buffer, &phdr, sizeof(phdr));
+        memcpy(checksum_buffer + sizeof(phdr), tcp_packet, tcp_len);
+        tcp->csum = ip_checksum(checksum_buffer, sizeof(phdr) + tcp_len);
+        kfree(checksum_buffer);
+    }
 
     net_ipv4_send(sock->remote_ip, IP_PROTO_TCP, tcp_packet, tcp_len);
+
+    kfree(tcp_packet);
 
     // Update seq for SYN, FIN, and payload
     if (flags & (TCP_FLAG_SYN | TCP_FLAG_FIN)) {
@@ -82,6 +94,9 @@ void net_tcp_receive(const uint8_t *src_ip, const void *data, uint16_t len)
 
     const uint8_t *payload = (const uint8_t *)data + header_len;
     uint16_t payload_len = len - header_len;
+
+    printk("TCP rx: src=%d.%d.%d.%d:%u dest=%u flags=%x len=%u payload=%u\n",
+           src_ip[0], src_ip[1], src_ip[2], src_ip[3], src_port, dest_port, flags, len, payload_len);
 
     struct socket *sock = 0;
     struct socket *listener = 0;
@@ -117,6 +132,10 @@ void net_tcp_receive(const uint8_t *src_ip, const void *data, uint16_t len)
                         memcpy(child->remote_ip, src_ip, 4);
                         child->rx_buf_size = 8192;
                         child->rx_buf = kmalloc(child->rx_buf_size);
+                        if (child->rx_buf == 0) {
+                            child->valid = false;
+                            break;
+                        }
                         child->rx_read_ptr = 0;
                         child->rx_write_ptr = 0;
                         child->tcp_state = TCP_STATE_SYN_RECEIVED;
@@ -131,6 +150,7 @@ void net_tcp_receive(const uint8_t *src_ip, const void *data, uint16_t len)
 
                         // Send SYN-ACK
                         net_tcp_send_segment(child, TCP_FLAG_SYN | TCP_FLAG_ACK, 0, 0);
+                        io_event_notify();
                         break;
                     }
                 }
@@ -140,6 +160,15 @@ void net_tcp_receive(const uint8_t *src_ip, const void *data, uint16_t len)
     }
 
     if (sock == 0) return;
+
+    if (flags & TCP_FLAG_RST) {
+        sock->tcp_state = TCP_STATE_CLOSED;
+        sock->so_error = 111; // ECONNREFUSED
+        sock->closed = true;
+        wait_queue_wake_all(&sock->wait_q);
+        io_event_notify();
+        return;
+    }
 
     // TCP State Machine
     if (sock->tcp_state == TCP_STATE_SYN_SENT) {
@@ -154,6 +183,7 @@ void net_tcp_receive(const uint8_t *src_ip, const void *data, uint16_t len)
 
             // Wake up waiters
             wait_queue_wake_all(&sock->wait_q);
+            io_event_notify();
         }
     } else if (sock->tcp_state == TCP_STATE_SYN_RECEIVED) {
         if (flags & TCP_FLAG_ACK) {
@@ -166,14 +196,18 @@ void net_tcp_receive(const uint8_t *src_ip, const void *data, uint16_t len)
             if (parent != 0 && parent->accept_count < 8) {
                 parent->accept_queue[parent->accept_count++] = sock;
                 wait_queue_wake_all(&parent->wait_q);
+                io_event_notify();
             }
         }
-    } else if (sock->tcp_state == TCP_STATE_ESTABLISHED) {
+    }
+
+    if (sock->tcp_state == TCP_STATE_ESTABLISHED) {
         if (flags & TCP_FLAG_ACK) {
             sock->snd_una = ack;
         }
 
         if (payload_len > 0) {
+            printk("TCP payload: seq=%u rcv_nxt=%u len=%u\n", seq, sock->rcv_nxt, payload_len);
             if (seq == sock->rcv_nxt) {
                 // Append payload to read buffer
                 uint32_t free_space;
@@ -197,6 +231,7 @@ void net_tcp_receive(const uint8_t *src_ip, const void *data, uint16_t len)
 
                     // Wake up readers
                     wait_queue_wake_all(&sock->wait_q);
+                    io_event_notify();
                 }
             } else if (seq < sock->rcv_nxt) {
                 // Duplicate data -> just ACK the current rcv_nxt
@@ -210,6 +245,7 @@ void net_tcp_receive(const uint8_t *src_ip, const void *data, uint16_t len)
             sock->tcp_state = TCP_STATE_CLOSE_WAIT;
             // Wake up readers for EOF
             wait_queue_wake_all(&sock->wait_q);
+            io_event_notify();
         }
     } else if (sock->tcp_state == TCP_STATE_FIN_WAIT_1) {
         if (flags & TCP_FLAG_ACK) {
@@ -222,6 +258,7 @@ void net_tcp_receive(const uint8_t *src_ip, const void *data, uint16_t len)
             sock->tcp_state = TCP_STATE_CLOSED;
             sock->closed = true;
             wait_queue_wake_all(&sock->wait_q);
+            io_event_notify();
         }
     } else if (sock->tcp_state == TCP_STATE_FIN_WAIT_2) {
         if (flags & TCP_FLAG_FIN) {
@@ -230,6 +267,7 @@ void net_tcp_receive(const uint8_t *src_ip, const void *data, uint16_t len)
             sock->tcp_state = TCP_STATE_CLOSED;
             sock->closed = true;
             wait_queue_wake_all(&sock->wait_q);
+            io_event_notify();
         }
     } else if (sock->tcp_state == TCP_STATE_LAST_ACK) {
         if (flags & TCP_FLAG_ACK) {
@@ -237,6 +275,7 @@ void net_tcp_receive(const uint8_t *src_ip, const void *data, uint16_t len)
             sock->tcp_state = TCP_STATE_CLOSED;
             sock->closed = true;
             wait_queue_wake_all(&sock->wait_q);
+            io_event_notify();
         }
     }
 }

@@ -60,6 +60,7 @@ void net_udp_receive(const uint8_t *src_ip, const void *data, uint16_t len)
 
                 // Wake up readers
                 wait_queue_wake_all(&sock->wait_q);
+                io_event_notify();
             }
             break;
         }
