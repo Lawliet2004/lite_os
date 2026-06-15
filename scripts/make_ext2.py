@@ -2,11 +2,38 @@ import struct
 import sys
 import os
 
+# The kernel's ext2 driver uses a single block group at offset 2048 with a
+# fixed 1024-byte bitmap (8192 blocks max per group). The persistent disk
+# image is only used by the kernel for /persist/* tests, while the actual
+# root filesystem lives in the embedded initramfs.
+#
+# To avoid overflowing the 8192-block budget, we filter out directories that
+# are not needed at /persist. The kernel test surface only requires:
+#   - /persist/hello.txt (seeded as inode 11)
+#   - The top-level directories /etc /var /home /usr (per Test 31)
+#   - Anything an installer might want to copy into place
+#
+# We therefore exclude large binary trees that already live in the initramfs.
+
+EXCLUDE_TOP_DIRS = {"tests", "bin", "sbin", "lib", "lib64"}
+EXCLUDE_FILE_SUFFIX_BYTES = 0
+
+
+def should_include(rel_path: str) -> bool:
+    parts = rel_path.split('/')
+    if not parts:
+        return False
+    if parts[0] in EXCLUDE_TOP_DIRS:
+        return False
+    return True
+
+
 def make_ext2(filename, source_dir):
     # EXT2 constants
     EXT2_SUPER_MAGIC = 0xEF53
     BLOCK_SIZE = 1024
     INODE_SIZE = 128
+    MAX_BLOCKS_PER_GROUP = BLOCK_SIZE * 8  # bitmap capacity
     
     # Simple block/inode allocator
     # We reserve blocks 0-19 for metadata and inode table
@@ -36,13 +63,19 @@ def make_ext2(filename, source_dir):
     for root, dirs, files in os.walk(source_dir):
         for d in dirs:
             host_path = os.path.join(root, d)
-            rel_path = os.path.relpath(host_path, source_dir)
-            dirs_to_add.add(rel_path.replace('\\', '/'))
+            rel_path = os.path.relpath(host_path, source_dir).replace('\\', '/')
+            if should_include(rel_path):
+                dirs_to_add.add(rel_path)
         for name in files:
             host_path = os.path.join(root, name)
-            rel_path = os.path.relpath(host_path, source_dir)
-            files_to_add.append((rel_path.replace('\\', '/'), host_path))
+            rel_path = os.path.relpath(host_path, source_dir).replace('\\', '/')
+            if should_include(rel_path):
+                files_to_add.append((rel_path, host_path))
             
+    skipped = sum(1 for root, _, files in os.walk(source_dir) for n in files
+                  if not should_include(os.path.relpath(os.path.join(root, n), source_dir).replace('\\', '/')))
+    if skipped:
+        print(f"make_ext2: excluded {skipped} files from {sorted(EXCLUDE_TOP_DIRS)} (live in initramfs)")
 
 
     with open(filename, 'r+b') as f:
@@ -193,9 +226,15 @@ def make_ext2(filename, source_dir):
                 buf += b'\x00' * (rlen - 8 - nlen)
             f.write(buf)
 
-        # Write Block Bitmap (Block 3)
+        if next_block > MAX_BLOCKS_PER_GROUP:
+            print(f"make_ext2: WARNING — {next_block} blocks used but bitmap covers "
+                  f"only {MAX_BLOCKS_PER_GROUP}. The kernel can still read existing files "
+                  f"but cannot allocate new blocks beyond {MAX_BLOCKS_PER_GROUP}.")
+
+        # Write Block Bitmap (Block 3). Clamp to the bitmap's actual byte size.
         block_bitmap = bytearray(BLOCK_SIZE)
-        for b in range(next_block):
+        capped = min(next_block, MAX_BLOCKS_PER_GROUP)
+        for b in range(capped):
             block_bitmap[b // 8] |= (1 << (b % 8))
         f.seek(3 * BLOCK_SIZE)
         f.write(block_bitmap)
@@ -209,13 +248,14 @@ def make_ext2(filename, source_dir):
 
         # Write correct Group Descriptor at 2048
         f.seek(2048)
-        free_blocks = 8192 - next_block
+        free_blocks = max(0, MAX_BLOCKS_PER_GROUP - capped)
         free_inodes = 128 - (next_inode - 1)
         used_dirs = 1 + len(dirs_to_add)
         gd = struct.pack('<LLLHHH', 3, 4, 5, free_blocks, free_inodes, used_dirs)
         f.write(gd)
 
-    print(f"Populated {filename} from {source_dir}")
+    print(f"Populated {filename} from {source_dir} ({next_block} blocks used, "
+          f"{next_inode - 1} inodes used)")
 
 if __name__ == "__main__":
     make_ext2(sys.argv[1], sys.argv[2] if len(sys.argv) > 2 else "build/initramfs-root")

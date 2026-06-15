@@ -20,11 +20,16 @@ struct pmm_stats {
 
 void pmm_init(volatile struct limine_memmap_response *memmap, uint64_t hhdm_offset);
 phys_addr_t pmm_alloc_page(void);
+phys_addr_t pmm_alloc_page_below(uint64_t max_addr);
+phys_addr_t pmm_alloc_trampoline_page(uint64_t max_addr);
+void pmm_reserve_trampoline_pages(uint32_t count);
 void pmm_free_page(phys_addr_t page);
 phys_addr_t pmm_alloc_pages_contiguous(uint64_t count);
 void pmm_free_pages_contiguous(phys_addr_t base, uint64_t count);
 struct pmm_stats pmm_get_stats(void);
 void pmm_print_stats(void);
+void pmm_ref_page(phys_addr_t page);
+uint16_t pmm_get_page_ref(phys_addr_t page);
 void pmm_self_test(void);
 
 #endif

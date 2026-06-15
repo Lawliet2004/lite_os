@@ -16,6 +16,7 @@ enum vmm_flags {
     VMM_PRESENT = 1ULL << 0,
     VMM_WRITABLE = 1ULL << 1,
     VMM_USER = 1ULL << 2,
+    VMM_COW = 1ULL << 9,
     VMM_NO_EXECUTE = 1ULL << 63,
 };
 
@@ -33,6 +34,7 @@ bool vmm_virt_to_phys(struct address_space *space, virt_addr_t virt, phys_addr_t
 struct address_space *vmm_kernel_address_space(void);
 struct address_space *vmm_create_address_space(void);
 struct address_space *vmm_clone_address_space(struct address_space *parent);
+int vmm_handle_cow(struct address_space *space, virt_addr_t virt);
 void vmm_destroy_address_space(struct address_space *space);
 void vmm_switch_address_space(struct address_space *space);
 bool vmm_is_user_address(virt_addr_t virt);

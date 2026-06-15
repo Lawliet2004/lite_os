@@ -2,6 +2,7 @@
 #include <lib/string.h>
 #include <mm/heap.h>
 #include <kernel/printk.h>
+#include <kernel/spinlock.h>
 
 extern struct socket socket_table[];
 extern void net_ipv4_send(const uint8_t dest_ip[4], uint8_t proto, const void *payload, uint16_t len);
@@ -76,6 +77,14 @@ void net_tcp_send_segment(struct socket *sock, uint8_t flags, const void *payloa
         sock->snd_nxt++;
     }
     sock->snd_nxt += len;
+
+    if ((flags & (TCP_FLAG_SYN | TCP_FLAG_FIN)) || len > 0) {
+        if (sock->rtx_time == 0) {
+            extern uint64_t pit_ticks(void);
+            sock->rtx_time = pit_ticks() + 100; // 100 ticks = 1 second
+            sock->rtx_count = 0;
+        }
+    }
 }
 
 void net_tcp_receive(const uint8_t *src_ip, const void *data, uint16_t len)
@@ -97,6 +106,9 @@ void net_tcp_receive(const uint8_t *src_ip, const void *data, uint16_t len)
 
     printk("TCP rx: src=%d.%d.%d.%d:%u dest=%u flags=%x len=%u payload=%u\n",
            src_ip[0], src_ip[1], src_ip[2], src_ip[3], src_port, dest_port, flags, len, payload_len);
+
+    uint64_t tflags; /* ponytail: hold socket_table_lock through the whole RX path */
+    spin_lock_irqsave(&socket_table_lock, &tflags);
 
     struct socket *sock = 0;
     struct socket *listener = 0;
@@ -156,10 +168,14 @@ void net_tcp_receive(const uint8_t *src_ip, const void *data, uint16_t len)
                 }
             }
         }
+        spin_unlock_irqrestore(&socket_table_lock, tflags);
         return;
     }
 
-    if (sock == 0) return;
+    if (sock == 0) {
+        spin_unlock_irqrestore(&socket_table_lock, tflags);
+        return;
+    }
 
     if (flags & TCP_FLAG_RST) {
         sock->tcp_state = TCP_STATE_CLOSED;
@@ -167,7 +183,22 @@ void net_tcp_receive(const uint8_t *src_ip, const void *data, uint16_t len)
         sock->closed = true;
         wait_queue_wake_all(&sock->wait_q);
         io_event_notify();
+        spin_unlock_irqrestore(&socket_table_lock, tflags);
         return;
+    }
+
+    if (flags & TCP_FLAG_ACK) {
+        if (ack > sock->snd_una) {
+            sock->snd_una = ack;
+            extern uint64_t pit_ticks(void);
+            if (sock->snd_nxt == sock->snd_una) {
+                sock->rtx_time = 0;
+                sock->rtx_count = 0;
+            } else {
+                sock->rtx_time = pit_ticks() + 100;
+                sock->rtx_count = 0;
+            }
+        }
     }
 
     // TCP State Machine
@@ -255,7 +286,7 @@ void net_tcp_receive(const uint8_t *src_ip, const void *data, uint16_t len)
         if (flags & TCP_FLAG_FIN) {
             sock->rcv_nxt++;
             net_tcp_send_segment(sock, TCP_FLAG_ACK, 0, 0);
-            sock->tcp_state = TCP_STATE_CLOSED;
+            sock->tcp_state = TCP_STATE_TIME_WAIT;
             sock->closed = true;
             wait_queue_wake_all(&sock->wait_q);
             io_event_notify();
@@ -264,7 +295,7 @@ void net_tcp_receive(const uint8_t *src_ip, const void *data, uint16_t len)
         if (flags & TCP_FLAG_FIN) {
             sock->rcv_nxt++;
             net_tcp_send_segment(sock, TCP_FLAG_ACK, 0, 0);
-            sock->tcp_state = TCP_STATE_CLOSED;
+            sock->tcp_state = TCP_STATE_TIME_WAIT;
             sock->closed = true;
             wait_queue_wake_all(&sock->wait_q);
             io_event_notify();
@@ -277,5 +308,63 @@ void net_tcp_receive(const uint8_t *src_ip, const void *data, uint16_t len)
             wait_queue_wake_all(&sock->wait_q);
             io_event_notify();
         }
+    } else if (sock->tcp_state == TCP_STATE_TIME_WAIT) {
+        // TCP TIME_WAIT state to absorb final packets
+        if (flags & TCP_FLAG_FIN) {
+            net_tcp_send_segment(sock, TCP_FLAG_ACK, 0, 0);
+        }
     }
+    spin_unlock_irqrestore(&socket_table_lock, tflags);
+}
+
+void net_tcp_timer_tick(void)
+{
+    extern uint64_t pit_ticks(void);
+    uint64_t now = pit_ticks();
+    uint64_t tflags;
+    spin_lock_irqsave(&socket_table_lock, &tflags);
+
+    for (int i = 0; i < 64; i++) {
+        struct socket *sock = &socket_table[i];
+        if (sock->valid && sock->type == SOCKET_TYPE_TCP) {
+            if (sock->rtx_time != 0 && now >= sock->rtx_time) {
+                if (sock->snd_nxt > sock->snd_una) {
+                    printk("TCP: Retransmission timeout (RTO) on socket local=%d remote=%d state=%d, rtx_count=%d\n",
+                           sock->local_port, sock->remote_port, sock->tcp_state, sock->rtx_count);
+                    
+                    if (sock->tcp_state == TCP_STATE_SYN_SENT) {
+                        uint32_t saved_nxt = sock->snd_nxt;
+                        sock->snd_nxt = sock->snd_una;
+                        net_tcp_send_segment(sock, TCP_FLAG_SYN, 0, 0);
+                        sock->snd_nxt = saved_nxt;
+                    } else if (sock->tcp_state == TCP_STATE_ESTABLISHED || sock->tcp_state == TCP_STATE_CLOSE_WAIT) {
+                        net_tcp_send_segment(sock, TCP_FLAG_ACK, 0, 0);
+                    } else if (sock->tcp_state == TCP_STATE_FIN_WAIT_1 || sock->tcp_state == TCP_STATE_LAST_ACK) {
+                        uint32_t saved_nxt = sock->snd_nxt;
+                        sock->snd_nxt = sock->snd_una;
+                        net_tcp_send_segment(sock, TCP_FLAG_FIN | TCP_FLAG_ACK, 0, 0);
+                        sock->snd_nxt = saved_nxt;
+                    }
+
+                    sock->rtx_count++;
+                    if (sock->rtx_count > 8) {
+                        printk("TCP: Connection timed out, closing socket\n");
+                        sock->tcp_state = TCP_STATE_CLOSED;
+                        sock->so_error = 110; // ETIMEDOUT
+                        sock->closed = true;
+                        sock->rtx_time = 0;
+                        wait_queue_wake_all(&sock->wait_q);
+                        io_event_notify();
+                    } else {
+                        uint32_t backoff = 100 * (1 << (sock->rtx_count > 4 ? 4 : sock->rtx_count));
+                        sock->rtx_time = now + backoff;
+                    }
+                } else {
+                    sock->rtx_time = 0;
+                    sock->rtx_count = 0;
+                }
+            }
+        }
+    }
+    spin_unlock_irqrestore(&socket_table_lock, tflags);
 }

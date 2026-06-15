@@ -27,8 +27,12 @@ jump_to_usermode:
     ; rsi = user_stack_top
     cli
 
-    ; Load user data segments (RPL=3)
-    mov ax, 0x2b
+    ; Load user data segments (RPL=3). With the Phase 3b GDT layout
+    ; the user-data selector is at GDT[3] (selector 0x18 | RPL 3 = 0x1b)
+    ; and the user-code selector is at GDT[4] (0x20 | 3 = 0x23). The
+    ; old layout had them at 0x28/0x30 which is now where the BSP's
+    ; TSS lives, so jumping there faults with a TSS GPF.
+    mov ax, 0x1b
     mov ds, ax
     mov es, ax
     mov fs, ax
@@ -36,10 +40,10 @@ jump_to_usermode:
     mov gs, ax
 
     ; Build iretq frame
-    push qword 0x2b     ; SS
+    push qword 0x1b     ; SS
     push rsi            ; RSP
     push qword 0x202    ; RFLAGS
-    push qword 0x33     ; CS
+    push qword 0x23     ; CS
     push rdi            ; RIP
 
     iretq

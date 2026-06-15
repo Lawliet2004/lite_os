@@ -79,7 +79,7 @@ For machine-readable data, see [compatibility_scoreboard.csv](./compatibility_sc
 
 | Binary | Static/Dynamic | Libc | Key Syscalls | Pass/Fail | Last Verified | Serial Evidence |
 |--------|---------------|------|--------------|-----------|---------------|-----------------|
-| **Raw Syscall Suite** (`test_all`) | Static | None | `write`, `exit_group`, `openat`, `read`, `close`, `newfstatat`, `brk`, `mmap`, `munmap`, `getpid`, `gettid`, `uname`, `clock_gettime`, `nanosleep`, `getrandom` | **PASS** | 2026-06-10 | `RAWSYSCALL: all tests passed` |
+| **Raw Syscall Suite** (`test_all`) | Static | None | `write`, `exit_group`, `openat`, `read`, `close`, `newfstatat`, `mount`, `umount2`, `brk`, `mmap`, `munmap`, `getpid`, `gettid`, `uname`, `clock_gettime`, `nanosleep`, `getrandom` | **PASS** | 2026-06-13 | `RAWSYSCALL: all tests passed` |
 | **Static Musl Hello** (`hello_musl`) | Static | musl | `writev`, `exit_group`, `readv` | **PASS** | 2026-06-10 | `Hello from musl!\nargc = 3` |
 | **Static BusyBox** | Static | musl | `chmod`, `fchmod`, `chown`, `fchown`, `lchown`, `umask`, `mkdirat`, `fchownat`, `unlinkat`, `renameat`, `symlinkat`, `readlinkat`, `fchmodat`, `dup3`, `renameat2`, `symlink`, `readlink` | **PASS** | 2026-06-10 | `Test 23: PASSED` |
 | **Dynamic Binary** | Dynamic | None | `mmap` (file-backed), PT_INTERP loader, auxv | **PASS** | 2026-06-10 | `Dynamic kernel loader path works!` |
@@ -120,8 +120,8 @@ The following syscalls were added in the Linux ABI, Process, Filesystem & Securi
 | setresgid | 119 | Credentials |
 | getresgid | 120 | Credentials |
 | prctl | 157 | Process |
-| mount | 165 | Filesystem (stub) |
-| umount2 | 166 | Filesystem (stub) |
+| mount | 165 | Filesystem (validated unsupported) |
+| umount2 | 166 | Filesystem (validated unsupported) |
 | epoll_wait | 232 | I/O multiplexing |
 | epoll_ctl | 233 | I/O multiplexing |
 | pselect6 | 270 | I/O multiplexing |
@@ -146,7 +146,7 @@ The following syscalls were added in the Linux ABI, Process, Filesystem & Securi
 | Signals | **Partial** | rt_sigaction, rt_sigprocmask, rt_sigreturn implemented; SIGCHLD to parent delivery partial |
 | select/epoll blocking | **Partial** | Returns ready fds immediately; does not truly block until data arrives |
 | User permissions | **Partial** | Credentials structure and vfs_check_permission() implemented; not yet wired into open/mkdir paths |
-| MAP_SHARED | **Not started** | Returns ENOSYS |
+| MAP_SHARED | **Partial** | Validates basic errors first; valid shared mappings return ENOSYS |
 | Copy-on-Write fork | **Partial** | Pages copied eagerly; no page-fault COW |
 | socketpair | **Partial** | `AF_UNIX` `SOCK_STREAM` implemented; other domains/types still missing |
 

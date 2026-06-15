@@ -4,6 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdarg.h>
+#include <stdbool.h>
 
 typedef int64_t ssize_t;
 typedef int64_t off_t;
@@ -229,6 +230,11 @@ int rename(const char *oldpath, const char *newpath);
 int chdir(const char *path);
 char *getcwd(char *buf, size_t size);
 int symlink(const char *target, const char *linkpath);
+int chmod_libc(const char *pathname, uint32_t mode);
+int fchmod_libc(int fd, uint32_t mode);
+int chown_libc(const char *pathname, int32_t owner, int32_t group);
+int fchown_libc(int fd, int32_t owner, int32_t group);
+uint32_t umask_libc(uint32_t mask);
 
 /* Process */
 int execve(const char *pathname, char *const argv[], char *const envp[]);
@@ -380,9 +386,12 @@ void strncpy(char *dest, const char *src, size_t n);
 char *strcat(char *dest, const char *src);
 size_t strlen(const char *text);
 char *strchr(const char *s, int c);
+char *strstr(const char *haystack, const char *needle);
 void *memset(void *dest, int value, size_t count);
 void *memcpy(void *dest, const void *src, size_t count);
+void *memmove(void *dest, const void *src, size_t count);
 int memcmp(const void *s1, const void *s2, size_t n);
+void _exit(int status) __attribute__((noreturn));
 int printf(const char *fmt, ...);
 int snprintf(char *buf, size_t size, const char *fmt, ...);
 
@@ -416,11 +425,148 @@ ssize_t sendmsg(int sockfd, const struct msghdr *msg, int flags);
 ssize_t recvmsg(int sockfd, struct msghdr *msg, int flags);
 
 /* Credentials / process controls */
+uint32_t getuid(void);
+uint32_t geteuid(void);
+uint32_t getgid(void);
+uint32_t getegid(void);
 int getresuid(uint32_t *ruid, uint32_t *euid, uint32_t *suid);
 int setresuid(uint32_t ruid, uint32_t euid, uint32_t suid);
 int getresgid(uint32_t *rgid, uint32_t *egid, uint32_t *sgid);
 int setresgid(uint32_t rgid, uint32_t egid, uint32_t sgid);
 int prctl(int option, unsigned long arg2, unsigned long arg3, unsigned long arg4, unsigned long arg5);
+
+/* ------------------------------------------------------------------ */
+/* User management helpers (passwd / shadow / SHA-256)                  */
+/* ------------------------------------------------------------------ */
+
+struct passwd_ent {
+    char name[64];
+    char passwd_field[8];   /* usually "x" - real hash lives in shadow */
+    uint32_t uid;
+    uint32_t gid;
+    char gecos[128];
+    char home[128];
+    char shell[64];
+};
+
+struct shadow_ent {
+    char name[64];
+    char hash[256];         /* may be "" (no password) or "!" (locked) or "$5$salt$digest" */
+    uint64_t last_change;
+    uint64_t min_age;
+    uint64_t max_age;
+    uint64_t warn_period;
+    uint64_t inactive;
+    uint64_t expire;
+};
+
+/* /etc/passwd lookup; returns 0 on success, -1 on not found */
+int pwent_by_name(const char *name, struct passwd_ent *out);
+int pwent_by_uid(uint32_t uid, struct passwd_ent *out);
+
+/* /etc/shadow lookup */
+int shent_by_name(const char *name, struct shadow_ent *out);
+
+/* Write /etc/shadow atomically replacing one entry's hash */
+int shent_set_hash(const char *name, const char *new_hash);
+
+/* SHA-256 (returns 32 binary bytes in `out32`) */
+void sha256(const void *data, size_t len, uint8_t out32[32]);
+
+/* Hash a password using the $5$ scheme: result is "$5$<salt>$<hex64>" */
+void pw_hash(const char *password, const char *salt, char *out, size_t out_size);
+
+/* Verify a plaintext password against a stored hash entry */
+int pw_verify(const char *password, const char *stored_hash);
+
+/* Terminal echo control via TCGETS/TCSETS */
+int term_echo_off(int fd, struct termios *saved);
+int term_echo_restore(int fd, const struct termios *saved);
+
+/* Read a single line from fd (strips trailing \n); returns length or -1 */
+ssize_t read_line(int fd, char *buf, size_t size);
+
+/* Number conversion helpers */
+int atoi(const char *s);
+unsigned long strtoul(const char *s, char **endptr, int base);
+long strtol(const char *s, char **endptr, int base);
+
+/* Tokenizer that splits a buffer in place on delimiter (e.g. ':') */
+char *strsep_inplace(char **stringp, int delim);
+
+/* Random salt generation: writes `size-1` URL-safe chars then NUL */
+void gen_salt(char *out, size_t size);
+
+/* ------------------------------------------------------------------ */
+/* DHCP packet parser (exposed so the init test fixture can exercise it) */
+/* ------------------------------------------------------------------ */
+
+#define DHCP_MAGIC_COOKIE   0x63825363UL
+#define DHCP_OP_BOOTREQUEST 1
+#define DHCP_OP_BOOTREPLY   2
+
+#define DHCP_MSG_DISCOVER  1
+#define DHCP_MSG_OFFER     2
+#define DHCP_MSG_REQUEST   3
+#define DHCP_MSG_ACK       5
+#define DHCP_MSG_NAK       6
+
+#define DHCP_OPT_SUBNET_MASK  1
+#define DHCP_OPT_ROUTER       3
+#define DHCP_OPT_DNS           6
+#define DHCP_OPT_HOSTNAME     12
+#define DHCP_OPT_DOMAIN_NAME  15
+#define DHCP_OPT_LEASE_TIME   51
+#define DHCP_OPT_MSG_TYPE     53
+#define DHCP_OPT_SERVER_ID    54
+#define DHCP_OPT_RENEWAL      58
+#define DHCP_OPT_REBIND       59
+#define DHCP_OPT_END          255
+
+struct dhcp_packet_hdr {
+    uint8_t  op;
+    uint8_t  htype;
+    uint8_t  hlen;
+    uint8_t  hops;
+    uint32_t xid;
+    uint16_t secs;
+    uint16_t flags;
+    uint8_t  ciaddr[4];
+    uint8_t  yiaddr[4];
+    uint8_t  siaddr[4];
+    uint8_t  giaddr[4];
+    uint8_t  chaddr[16];
+    char     sname[64];
+    char     file[128];
+    uint32_t magic;
+} __attribute__((packed));
+
+struct dhcp_lease {
+    uint8_t  server_id[4];
+    bool     has_server_id;
+    uint8_t  subnet_mask[4];
+    bool     has_subnet_mask;
+    uint8_t  router[4];
+    bool     has_router;
+    uint8_t  dns[4];
+    bool     has_dns;
+    uint32_t lease_seconds;
+    uint32_t t1_seconds;
+    uint32_t t2_seconds;
+    char     hostname[64];
+    bool     has_hostname;
+    char     domain[64];
+    bool     has_domain;
+    uint8_t  msg_type;
+    uint8_t  your_ip[4];
+};
+
+/* Parse a DHCP reply packet. Returns 0 on success, -1 on malformed
+ * packet, wrong op, wrong magic, or wrong XID. `opts` points just past
+ * the magic cookie; `opts_len` is the number of bytes in the option area. */
+int dhcp_parse_reply(const void *pkt, size_t pkt_len,
+                     const void *opts, size_t opts_len,
+                     uint32_t expected_xid, struct dhcp_lease *out_lease);
 
 #define LINUX_REBOOT_CMD_RESTART    0x01234567
 #define LINUX_REBOOT_CMD_POWER_OFF  0x4321FEDC

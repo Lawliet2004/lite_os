@@ -157,6 +157,7 @@ void exception_dispatch(struct interrupt_frame *frame)
                             /* For MAP_PRIVATE file-backed with PROT_WRITE, map read-only initially (COW) */
                             if (!vma->is_anonymous && vma->is_private && (vma->prot_flags & PROT_WRITE)) {
                                 map_flags &= ~VMM_WRITABLE;
+                                map_flags |= VMM_COW;
                             }
 
                             if (vmm_map(proc->address_space, fault_page, phys, map_flags) == 0) {
@@ -175,50 +176,12 @@ void exception_dispatch(struct interrupt_frame *frame)
         if ((frame->error_code & 1) != 0 && (frame->error_code & 2) != 0) { // Present + Write
             if (current_task != 0 && current_task->process != 0) {
                 struct process *proc = current_task->process;
-                for (int i = 0; i < VMA_MAX; i++) {
-                    struct vma *vma = &proc->vmas[i];
-                    if (vma->valid && cr2 >= vma->start && cr2 < vma->end) {
-                        /* Only handle COW for MAP_PRIVATE file-backed with PROT_WRITE */
-                        if (vma->is_private && (vma->prot_flags & PROT_WRITE) && !vma->is_anonymous) {
-                            uint64_t fault_page = cr2 & ~(uint64_t)0xfff;
-
-                            /* Get current physical page */
-                            phys_addr_t old_phys;
-                            if (!vmm_virt_to_phys(proc->address_space, fault_page, &old_phys)) {
-                                break; /* Should not happen */
-                            }
-
-                            /* Allocate new page */
-                            phys_addr_t new_phys = pmm_alloc_page();
-                            if (new_phys == 0) {
-                                /* OOM - deliver SIGBUS */
-                                task_send_signal(current_task, SIGBUS);
-                                return;
-                            }
-
-                            /* Copy old page contents to new page */
-                            void *old_va = phys_to_virt(old_phys);
-                            void *new_va = phys_to_virt(new_phys);
-                            memcpy(new_va, old_va, VMM_PAGE_SIZE);
-
-                            /* Unmap old page */
-                            vmm_unmap(proc->address_space, fault_page);
-
-                            /* Map new page with write permission */
-                            uint64_t new_flags = vma->flags | VMM_WRITABLE;
-                            if (vmm_map(proc->address_space, fault_page, new_phys, new_flags) != 0) {
-                                pmm_free_page(new_phys);
-                                task_send_signal(current_task, SIGBUS);
-                                return;
-                            }
-
-                            /* Free old physical page */
-                            pmm_free_page(old_phys);
-
-                            return; /* COW handled successfully */
-                        }
-                        break;
-                    }
+                int cow_res = vmm_handle_cow(proc->address_space, cr2);
+                if (cow_res == 0) {
+                    return; /* COW handled successfully */
+                } else if (cow_res == -2) {
+                    task_send_signal(current_task, SIGBUS);
+                    return;
                 }
             }
         }
@@ -251,6 +214,9 @@ void exception_dispatch(struct interrupt_frame *frame)
                 task_deliver_signals(0);
                 task_exit(-sig);
             }
+            /* The task is now terminated. Return to the scheduler instead
+             * of falling through to the kernel-panic path. */
+            return;
         } else {
             task_exit(-((int)frame->vector));
         }

@@ -1,3 +1,4 @@
+#include <drivers/fbcon.h>
 #include <drivers/serial.h>
 #include <drivers/vga_text.h>
 #include <kernel/printk.h>
@@ -10,6 +11,7 @@ static void put_char(char ch)
 {
     serial_write_char(ch);
     vga_text_write_char(ch);
+    fbcon_putc(ch);
     kmsg_put_char(ch);
 }
 

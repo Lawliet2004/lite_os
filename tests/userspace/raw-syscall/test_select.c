@@ -126,11 +126,21 @@ static void noop_handler(int sig)
     (void)sig;
 }
 
+__asm__(
+".global __restore_rt\n"
+"__restore_rt:\n"
+"    movq $15, %rax\n"
+"    syscall\n"
+);
+void __restore_rt(void);
+
 static int install_usr1_handler(void)
 {
     struct sigaction_linux act;
     for (size_t i = 0; i < sizeof(act); i++) ((unsigned char *)&act)[i] = 0;
     act.sa_handler = noop_handler;
+    act.sa_flags = 0x04000000; // SA_RESTORER
+    act.sa_restorer = __restore_rt;
     return (int)syscall4_r10(SYS_rt_sigaction, SIGUSR1, (long)&act, 0, sizeof(uint64_t));
 }
 

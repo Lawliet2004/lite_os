@@ -333,11 +333,11 @@ Acceptance: initramfs mounts as root, tmpfs mounts on `/tmp`, ext2 images can be
 - IPv4
 - ICMP
 - UDP
-- TCP later
+- TCP with retransmission timers and proper FIN handshake state machine
 - sockets API
 
 Acceptance: guest can ping host, UDP echo works, TCP connects, and a simple
-HTTP server can run.
+HTTP server can run. Verified with robust TCP state machine transitions (SYN, ESTABLISHED, FIN_WAIT, TIME_WAIT, CLOSE_WAIT) and TCP segment retransmission timers with exponential backoff.
 
 ## Phase 25: VirtualBox Support
 
@@ -423,3 +423,80 @@ fails on panic or debug memory leaks.
 Acceptance: every implementation step reports files changed, implementation,
 invariants, build steps, test steps, expected serial output, known limitations,
 and next step.
+
+## Phase 31: SMP Foundation (BSP-only)
+
+Partially completed in the current development cycle. Phase 1
+established the per-CPU infrastructure without bringing up APs yet.
+Phase 5 added per-CPU TLB-shootdown queues so cross-CPU vmm_unmap
+fires invlpg-by-address instead of a full TLB flush. Phase 6 bounded
+the LAPIC IPI wait and wired the scheduler's reschedule-decision
+path to `smp_send_ipi_to_cpu()`, unblocking `-smp 4` boots. The
+per-CPU runqueue refactor (Phase 4) added the fields to
+`struct cpu_data` but the scheduler still uses global state — a
+full migration showed addc=3/add=3 (all tasks correctly added to
+the per-CPU runqueue) but the BSP then failed to make progress
+through the Phase 9 & 10 test suite. The hang couldn't be isolated
+in the BSP-only test path; needs live APs to bisect. Reverted to
+globals so the kernel boots.
+
+- [x] `kernel/include/arch/x86_64/smp.h` — per-CPU API, MSR numbers,
+  LAPIC register offsets, ICR delivery-mode encodings, compile-time
+  offset checks for the per-CPU struct, TLB-shootdown queue types
+  and accessors (Phase 5), `reschedule_self_test` decl (Phase 6),
+  per-CPU runqueue fields (`runqueue_head`, `runqueue_tail`,
+  `task_count`, `idle_task`, Phase 4 partial).
+- [x] `kernel/arch/x86_64/smp.c` — APIC detection (CPUID.1:EDX bit 9),
+  LAPIC base from IA32_APIC_BASE, `smp_init()` populates the per-CPU
+  array and installs the BSP's GS base, `smp_ap_entry()` C-side
+  trampoline landing, IPI send helpers (with 10 000-spin bounded
+  wait on ICR `delivery_status`, Phase 6), per-CPU TLB-shootdown
+  queue publish/drain and `tlb_shootdown_self_test()` (Phase 5),
+  `reschedule_self_test()` (Phase 6).
+- [x] `kernel/arch/x86_64/syscall/syscall_entry.c` — migrated
+  `bsp_cpu_context` to `g_cpu_data[0]`; `syscall_set_kernel_rsp`
+  updates the per-CPU kernel stack slot.
+- [x] `kernel/arch/x86_64/syscall/syscall_stub.S` — syscall entry
+  reads kernel stack from `gs:8` (was `gs:0`) and saves user RSP to
+  `gs:16` (was `gs:8`) to match the new `cpu_data` layout.
+- [x] `kernel/arch/x86_64/memory/vmm.c` — `vmm_unmap` publishes the
+  vaddr to every other CPU's TLB queue before broadcasting
+  `IPI_VECTOR_TLB_SHOOTDOWN` (Phase 5).
+- [x] `kernel/arch/x86_64/interrupt/isr.S` + `idt.c` — three IPI
+  stubs (`isr_ipi0/1/2`) and IDT gates for vectors 0x40–0x42.
+- [x] `kernel/sched/scheduler.c` — `sched_tick()` calls
+  `smp_send_ipi_to_cpu(smp_current_cpu_id(), IPI_VECTOR_RESCHEDULE)`
+  after the per-CPU `need_resched` is set when `g_cpu_count > 1`
+  (Phase 6 + Phase 6 followup). The `need_resched` flag is per-CPU
+  (`g_cpu_data[cpu].need_resched`), zeroed in `smp_init` and consumed
+  by the idle loop and `schedule()`. The reschedule IPI handler
+  (`ipi_dispatch` in `smp.c`) sets the target CPU's per-CPU flag, so
+  when APs come up, the target's next `schedule()` will actually
+  re-evaluate. The runqueue is still global; the per-CPU fields in
+  `struct cpu_data` are zeroed in `smp_init` and ready for the
+  migration.
+- [x] `kernel/core/kernel.c` — calls `smp_init()`,
+  `tlb_shootdown_self_test()`, `reschedule_self_test()`, and
+  `panic_broadcast_self_test()` (Phase 32 followup) after the
+  scheduler init. With `-smp 1` and `-smp 4` both, the kernel
+  reaches userspace and runs the test suite (Phase 9 & 10, Tests
+  1–22) without regression.
+- [ ] `kernel/arch/x86_64/ap_trampoline.S` — 16-bit→64-bit AP startup
+  code (deferred to Phase 32). Blocked on QEMU 8.2.2 leaving the
+  AP's LAPIC SVR at 0 in the "wait for SIPI" code path. GDB stub
+  workaround attempted but blocked: no `gdb`/`gdb-multiarch` is
+  installed in MSYS2 (`pacman` not on PATH either), so we can't
+  connect to QEMU's `-gdb` stub to manually set the AP's LAPIC
+  SVR.
+
+Acceptance: `qemu -smp 1` and `qemu -smp 4` both boot to
+"Sched: reschedule IPI self-test passed" and run the full init
+test suite (Phase 9 & 10: `test_read_kernel terminated OK`,
+`test_privileged terminated OK`, `init program exited with 0 OK`,
+Tests 1–22: PASSED). With `-smp 4` the BSP detects the LAPIC,
+runs both self-tests, and reaches the AP-bring-up phase; APs
+remain parked at the QEMU "wait for SIPI" stall (`LAPIC SVR=0`);
+the bounded wait in `lapic_send_ipi()` ensures the BSP doesn't
+hang on the broadcast to those APs.
+in `lapic_send_ipi()` ensures the BSP doesn't hang on the broadcast
+to those APs.

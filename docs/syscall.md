@@ -151,7 +151,7 @@ x86_64-freestanding-none`.
 | `test_process`      | `getpid`, `gettid`, `uname`                                  |
 | `test_clock`        | `clock_gettime`, `nanosleep`                                 |
 | `test_getrandom`    | `getrandom`                                                  |
-| `test_all`          | All of the above; prints "RAWSYSCALL: all tests passed"     |
+| `test_all`          | All of the above plus `mount`/`umount2` error behavior; prints "RAWSYSCALL: all tests passed" |
 
 Build: `make userspace-tests`
 
@@ -168,7 +168,9 @@ Phase 2: raw-syscall tests PASSED
 
 | Feature | Status | Details |
 |---------|--------|---------|
+| userspace mount/umount | Partial | Validates basic inputs and returns `-ENOSYS` instead of false success |
 | File-backed mmap | ✅ Full   | MAP_PRIVATE with COW page fault loading; offset alignment validated |
+| MAP_SHARED mmap | Partial | Invalid requests return normal errno first; valid shared mappings return `-ENOSYS` |
 | symlinks | ❌ None | `readlink` returns `-ENOSYS` for non-symlinks |
 | uid/gid | Stub | Always returns 0 (root) |
 | signal delivery to user stack | ❌ None | `rt_sigaction` stores handlers but does not deliver to user stack |

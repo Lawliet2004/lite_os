@@ -24,15 +24,17 @@
 #define EFER_SCE   (1U << 0)   /* System Call Enable */
 
 /*
- * Structure for per-CPU storage, accessed via GS segment base.
- * Struct offsets:
- *   offset 0: kernel_stack
- *   offset 8: user_scratch
+ * The legacy per-CPU struct accessed via GS segment base has been replaced
+ * by the richer `struct cpu_data` defined in <arch/x86_64/smp.h>. The
+ * offsets are kept stable for the syscall entry stub:
+ *
+ *   gs:0   self          (pointer to the struct; used for verification)
+ *   gs:8   kernel_stack  (loaded into RSP on SYSCALL entry)
+ *   gs:16  user_scratch  (user RSP is saved here across the syscall)
+ *
+ * See kernel/arch/x86_64/smp.h for the full per-CPU layout.
  */
-struct cpu_context {
-    uint64_t kernel_stack;  /* offset 0 */
-    uint64_t user_scratch;   /* offset 8 */
-} __attribute__((packed));
+#include <arch/x86_64/smp.h>
 
 /*
  * syscall_init() - program MSRs for SYSCALL/SYSRET.

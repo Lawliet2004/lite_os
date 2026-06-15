@@ -30,14 +30,24 @@ uint16_t ip_checksum(const void *data, size_t len)
 static void net_thread_entry(void)
 {
     extern void net_poll(void);
+    extern void net_tcp_timer_tick(void);
+    uint64_t last_tick = 0;
     while (1) {
         net_poll();
+        extern uint64_t pit_ticks(void);
+        uint64_t now = pit_ticks();
+        if (now != last_tick) {
+            net_tcp_timer_tick();
+            last_tick = now;
+        }
         task_yield();
     }
 }
 
 void net_init(void)
 {
+    extern spinlock_t socket_table_lock;
+    spinlock_init(&socket_table_lock, "socket_table");
     virtio_net_get_mac(my_mac);
     printk("Net: Initialized network protocol stack\n");
     printk("  MAC: %02x:%02x:%02x:%02x:%02x:%02x\n",

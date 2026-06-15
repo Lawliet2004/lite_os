@@ -18,6 +18,91 @@ LiteNix is a monolithic but modular x86_64 kernel targeting Linux ABI compatibil
 - **PIT**: timer at 100 Hz driving scheduler preemption and `nanosleep` wakeup (`kernel/drivers/pit.c`)
 - **Keyboard**: IRQ 1 acknowledged; not yet line-buffered for userspace (`kernel/drivers/tty.c`)
 
+## SMP Support (Phase 1–6, BSP only)
+
+- **APIC detection**: `smp_init()` checks CPUID.1:EDX bit 9; reports LAPIC base
+  from IA32_APIC_BASE MSR (`kernel/arch/x86_64/smp.c`).
+- **Per-CPU data**: 64-slot `g_cpu_data[MAX_CPUS]` array, accessed via the GS
+  segment base. Offsets 0/8/16 are `self`/`kernel_stack`/`user_scratch` for
+  the syscall entry stub; remaining fields reserved for Phase 2+ (idle task,
+  current_task, in_irq, sched_ticks, halt flag).
+- **GS base**: BSP installs `MSR_GS_BASE = &g_cpu_data[0]`; future APs will
+  install their own slot in `smp_ap_entry()`. Legacy `bsp_cpu_context` was
+  merged into `g_cpu_data[0]` so the syscall path keeps working unchanged.
+- **AP bring-up**: deferred to Phase 32. The 16-bit → 64-bit trampoline
+  skeleton lives in `kernel/arch/x86_64/ap_trampoline.S` (not yet built).
+  QEMU 8.2.2 has a known limitation where the AP's LAPIC SVR is left at 0
+  (disabled) in the "wait for SIPI" code, so the SIPI never delivers;
+  AP bring-up is blocked on this until a QEMU version that enables the
+  AP's LAPIC before parking is available.
+- **IPI infrastructure**: three IPI vectors (0x40 reschedule, 0x41 TLB
+  shootdown, 0x42 panic) installed in the IDT; per-vector delivery
+  counters. `smp_send_ipi` and `smp_broadcast_ipi_excluding_self` exist.
+  `lapic_send_ipi()` waits for the ICR `delivery_status` bit with a
+  10 000-iteration bound (Phase 6) so a missing/disabled target LAPIC
+  in QEMU doesn't spin the kernel forever.
+- **Per-CPU TLB-shootdown queues** (Phase 5): `g_tlb_queue[MAX_CPUS]`
+  is a 64-byte-aligned array of bounded rings (16 entries each) used to
+  pass the vaddr from the sender to each target CPU. `vmm_unmap` calls
+  `tlb_shootdown_publish_all_others(virt)` before the broadcast, and
+  each receiver's IPI handler calls `tlb_shootdown_drain()` which does
+  `invlpg` for every pending entry. Replaces the prior full-TLB flush.
+- **Cross-CPU reschedule hookup** (Phase 6): `sched_tick()` calls
+  `smp_send_ipi_to_cpu(smp_current_cpu_id(), IPI_VECTOR_RESCHEDULE)`
+  after `need_resched = true` when `g_cpu_count > 1`. In single-CPU
+  mode this is a no-op; the per-CPU runqueue (next phase) is what
+  determines the actual remote target.
+- **Self-tests**:
+  - `tlb_shootdown_self_test()` — enqueues 5 entries into the BSP's
+    own queue, drains, verifies head/tail accounting and the `invlpg`
+    path.
+  - `reschedule_self_test()` — fakes a second CPU with a non-existent
+    LAPIC id and calls `smp_send_ipi_to_cpu()`, verifying the
+    bounded-wait path in `lapic_send_ipi()` returns instead of hanging.
+  - `panic_broadcast_self_test()` — fakes a second CPU and calls
+    `smp_broadcast_panic()`, verifying the cross-CPU panic
+    broadcast path doesn't hang the BSP on a missing target.
+  - `ipi_handler_self_test()` — invokes `smp_handle_ipi()` directly
+    for the reschedule and TLB-shootdown paths and verifies the
+    per-CPU state was updated correctly (per-CPU `need_resched` flag
+    set, per-CPU TLB queue drained, delivery counters bumped). The
+    panic path is not tested (it would halt). The IPI never
+    actually arrives in single-CPU mode (`smp_send_ipi_to_cpu`
+    skips self, broadcast shorthand has no targets), so this is
+    the only way to verify the handler logic in the BSP-only
+    test path.
+- **End-to-end IPI receive (deferred)**: `smp_self_ipi()` is
+  available (sends an IPI to the calling CPU) but the
+  corresponding self-test panics in QEMU 8.2.2 — the BSP's
+  LAPIC SVR is enabled (0x1FF) but the self-IPI is never
+  delivered to the BSP in TCG. The IPI receive path will be
+  exercised when APs come online (QEMU 9.x or a GDB-stub
+  workaround). For now, the `ipi_handler_self_test` above
+  verifies the handler logic directly without the LAPIC.
+- **Kernel canary (Phase 33)**: `syscall_dispatch()` checks a
+  `volatile uint64_t kernel_canary` on every syscall. If the
+  value has been modified, the kernel panics. Catches stack
+  overflows in the syscall path, BSS scribbles, and ROP
+  gadgets that pivot the stack into the canary. Fixed value
+  (predictable) is fine as a tripwire; for a real security
+  barrier the value would need to be random per-boot (no
+  good RNG in the kernel today).
+- **Cross-CPU panic** (Phase 32 followup): `panic_at()` calls
+  `smp_broadcast_panic()` before entering the cli/hlt loop, so a
+  panicking CPU tells its peers to halt. The IPI handler on the
+  receiving side halts via `cpu_halt()`. In single-CPU mode this
+  is a no-op (no targets).
+- **Per-CPU need_resched** (Phase 6 followup): the
+  `need_resched` flag is per-CPU (`g_cpu_data[cpu].need_resched`).
+  The reschedule IPI handler sets the target CPU's flag, so when
+  APs come online, a target's next `schedule()` will actually
+  re-evaluate.
+- **Multi-CPU verified**: with `-smp 1` and `-smp 4` both, the kernel
+  reaches the userspace init and runs tests 1–22 without regression.
+  APs remain at the QEMU "wait for SIPI" stall (`LAPIC SVR=0`) in both
+  cases; the bounded wait + AP-bring-up timeout let the boot continue
+  past the SMP init phase either way.
+
 ## Physical Memory Manager (PMM)
 
 - Bitmap allocator, 4 KiB pages (`kernel/mm/pmm.c`)
@@ -112,7 +197,7 @@ LiteNix is a monolithic but modular x86_64 kernel targeting Linux ABI compatibil
 
 ## Procfs
 
-- `/proc/version`, `/proc/cpuinfo`, `/proc/meminfo`, `/proc/uptime`, `/proc/stat`
+- `/proc/version`, `/proc/cpuinfo`, `/proc/meminfo`, `/proc/uptime`, `/proc/stat`, `/proc/mounts`
 - `/proc/self/status`, `/proc/<pid>/status` (dynamically created on first access)
 - Dynamic PID directory listing via custom `readdir` callback
 

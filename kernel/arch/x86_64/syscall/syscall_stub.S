@@ -26,14 +26,14 @@ syscall_handler:
     ; Swap GS to get access to kernel per-CPU area
     swapgs
 
-    ; Save user RSP into bsp_cpu_context.user_scratch (offset 8)
-    mov     [gs:8], rsp
+    ; Save user RSP into per-cpu.user_scratch (offset 16)
+    mov     [gs:16], rsp
 
-    ; Load kernel RSP from bsp_cpu_context.kernel_stack (offset 0)
-    mov     rsp, [gs:0]
+    ; Load kernel RSP from per-cpu.kernel_stack (offset 8)
+    mov     rsp, [gs:8]
 
     ; Push user RSP onto kernel stack (saves it context-switch safely)
-    push    qword [gs:8]
+    push    qword [gs:16]
 
     ; Save caller-saved registers and syscall ABI registers onto kernel stack.
     ; We save all GP regs to form the syscall_frame struct (matches syscall.h).

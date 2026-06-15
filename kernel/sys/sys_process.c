@@ -12,6 +12,7 @@
 #include <lib/string.h>
 #include <fs/vfs.h>
 #include <stdint.h>
+#include <stdbool.h>
 #include <arch/x86_64/cpu.h>
 #include <arch/x86_64/io.h>
 #include <drivers/pit.h>
@@ -262,22 +263,38 @@ int64_t sys_kill(struct syscall_frame *frame)
     int sig = (int)frame->rsi;
 
     if (sig < 0 || sig >= 64) return -(int64_t)EINVAL;
+
+    /* ponytail: permission check. caller_euid==0 (root) or same ruid/euid as target. */
+    struct process *caller = (current_task != 0) ? current_task->process : 0;
+    uint32_t ce = (caller != 0) ? caller->euid : 0;
+    uint32_t cr = (caller != 0) ? caller->ruid : 0;
+    bool caller_root = (caller == 0) || (ce == 0);
+
     if (pid == 0) {
         /* kill all in current process group */
-        if (sig != 0 && current_task && current_task->process)
+        if (sig != 0 && current_task && current_task->process) {
+            if (!caller_root && caller->sid != current_task->process->pgid)
+                return -(int64_t)EPERM;
             task_send_signal_pgid(current_task->process->pgid, sig);
+        }
         return 0;
     }
     if (pid < 0) {
         /* kill process group -pid */
-        if (sig != 0)
+        if (sig != 0) {
+            if (!caller_root && caller->sid != (uint32_t)(-pid))
+                return -(int64_t)EPERM;
             task_send_signal_pgid((uint32_t)(-pid), sig);
+        }
         return 0;
     }
 
     struct process *proc = find_process((uint64_t)pid);
     if (proc == 0 || proc->main_thread == 0) {
         return -(int64_t)ESRCH;
+    }
+    if (!caller_root && cr != proc->ruid && cr != proc->euid) {
+        return -(int64_t)EPERM;
     }
 
     task_send_signal(proc->main_thread, sig);
@@ -412,6 +429,10 @@ static void copy_uts_field(char dst[65], const char *src)
     dst[len] = '\0';
 }
 
+/* Defined in kernel/fs/vfs.c — read by sys_uname() so uname -n and the
+ * /proc/sys/kernel/hostname value stay in sync with the hostname command. */
+extern char kernel_hostname[65];
+
 int64_t sys_uname(struct syscall_frame *frame)
 {
     struct utsname_linux *ubuf = (struct utsname_linux *)frame->rdi;
@@ -420,7 +441,7 @@ int64_t sys_uname(struct syscall_frame *frame)
     struct utsname_linux kbuf;
     memset(&kbuf, 0, sizeof(kbuf));
     copy_uts_field(kbuf.sysname, "LiteNix");
-    copy_uts_field(kbuf.nodename, "litenix");
+    copy_uts_field(kbuf.nodename, kernel_hostname);
     copy_uts_field(kbuf.release, "0.1.0");
     copy_uts_field(kbuf.version, "LiteNix freestanding kernel");
     copy_uts_field(kbuf.machine, "x86_64");
@@ -804,6 +825,21 @@ int64_t sys_getresuid(struct syscall_frame *frame)
     return 0;
 }
 
+/* ponytail: Linux setresuid semantics with _POSIX_SAVED_IDS constraint.
+ * Root (euid==0) may set any value. A non-root caller may only set each of
+ * ruid/euid/suid to a value already in the current {ruid, euid, suid} set,
+ * or pass -1 to leave it unchanged. This preserves the saved-uid cage and
+ * stops a non-root process from regaining privileges via a later SUID exec. */
+static int setres_id_check(uint32_t cur_ruid, uint32_t cur_euid, uint32_t cur_suid,
+                           uint32_t new_ruid, uint32_t new_euid, uint32_t new_suid)
+{
+    if (cur_euid == 0) return 0; /* root bypass */
+    if (new_ruid != (uint32_t)-1 && new_ruid != cur_ruid && new_ruid != cur_euid && new_ruid != cur_suid) return -1;
+    if (new_euid != (uint32_t)-1 && new_euid != cur_ruid && new_euid != cur_euid && new_euid != cur_suid) return -1;
+    if (new_suid != (uint32_t)-1 && new_suid != cur_ruid && new_suid != cur_euid && new_suid != cur_suid) return -1;
+    return 0;
+}
+
 int64_t sys_setresuid(struct syscall_frame *frame)
 {
     uint32_t ruid = (uint32_t)frame->rdi;
@@ -811,8 +847,8 @@ int64_t sys_setresuid(struct syscall_frame *frame)
     uint32_t suid = (uint32_t)frame->rdx;
     if (!current_task || !current_task->process) return -(int64_t)EPERM;
     struct process *p = current_task->process;
-    /* Only root (euid==0) can set arbitrary IDs */
-    if (p->euid != 0) return -(int64_t)EPERM;
+    if (setres_id_check(p->ruid, p->euid, p->suid, ruid, euid, suid) != 0)
+        return -(int64_t)EPERM;
     if (ruid != (uint32_t)-1) p->ruid = ruid;
     if (euid != (uint32_t)-1) p->euid = euid;
     if (suid != (uint32_t)-1) p->suid = suid;
@@ -839,7 +875,8 @@ int64_t sys_setresgid(struct syscall_frame *frame)
     uint32_t sgid = (uint32_t)frame->rdx;
     if (!current_task || !current_task->process) return -(int64_t)EPERM;
     struct process *p = current_task->process;
-    if (p->euid != 0) return -(int64_t)EPERM;
+    if (setres_id_check(p->rgid, p->egid, p->sgid, rgid, egid, sgid) != 0)
+        return -(int64_t)EPERM;
     if (rgid != (uint32_t)-1) p->rgid = rgid;
     if (egid != (uint32_t)-1) p->egid = egid;
     if (sgid != (uint32_t)-1) p->sgid = sgid;
@@ -883,9 +920,10 @@ int64_t sys_prctl(struct syscall_frame *frame)
         return 0;
     }
     case PR_SET_DUMPABLE:
-        return 0; /* accept silently */
+        current_task->process->dumpable = (arg2 != 0);
+        return 0;
     case PR_GET_DUMPABLE:
-        return 1; /* always dumpable */
+        return current_task->process->dumpable ? 1 : 0;
     default:
         return -(int64_t)EINVAL;
     }

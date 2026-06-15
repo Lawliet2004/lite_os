@@ -15,6 +15,7 @@ void tty_init(void)
 {
     memset(&console_tty, 0, sizeof(console_tty));
     wait_queue_init(&console_tty.read_wq);
+    spinlock_init(&console_tty.lock, "tty");
 
     console_tty.winsize.ws_row = 24;
     console_tty.winsize.ws_col = 80;
@@ -45,6 +46,8 @@ int tty_driver_write(const void *buf, size_t count)
 
 void tty_input_char(char ch)
 {
+    uint64_t flags;
+    spin_lock_irqsave(&console_tty.lock, &flags);
     struct termios *t = &console_tty.termios;
 
     /* 1. Job Control / Interrupt signal handling */
@@ -59,6 +62,23 @@ void tty_input_char(char ch)
         } else if (current_task != 0 && current_task->process != 0) {
             task_send_signal(current_task, 2); /* SIGINT fallback */
         }
+        spin_unlock_irqrestore(&console_tty.lock, flags);
+        return;
+    }
+
+    /* Ctrl-Z: Job control suspend signal */
+    if ((t->c_lflag & 0x0001) /* ISIG */ && ch == 26 /* Ctrl-Z */) {
+        if (t->c_lflag & 0x0008) /* ECHO */ {
+            serial_write_char('^');
+            serial_write_char('Z');
+            serial_write_char('\n');
+        }
+        if (console_tty.fg_pgid != 0) {
+            task_send_signal_pgid(console_tty.fg_pgid, 20); /* SIGTSTP */
+        } else if (current_task != 0 && current_task->process != 0) {
+            task_send_signal(current_task, 20); /* SIGTSTP fallback */
+        }
+        spin_unlock_irqrestore(&console_tty.lock, flags);
         return;
     }
 
@@ -128,11 +148,14 @@ void tty_input_char(char ch)
             io_event_notify();
         }
     }
+    spin_unlock_irqrestore(&console_tty.lock, flags);
 }
 
 int tty_driver_read(void *buf, size_t count)
 {
     if (count == 0) return 0;
+    uint64_t flags;
+    spin_lock_irqsave(&console_tty.lock, &flags);
     struct termios *t = &console_tty.termios;
     char *cbuf = buf;
     size_t read_bytes = 0;
@@ -140,7 +163,7 @@ int tty_driver_read(void *buf, size_t count)
     if (t->c_lflag & 0x0002) /* ICANON */ {
         /* Block until at least one committed line (ending with \n or EOF) is ready */
         while (commit_count == 0) {
-            wait_queue_sleep(&console_tty.read_wq);
+            wait_queue_sleep_locked(&console_tty.read_wq);
         }
 
         /* Copy from ring buffer until \n is consumed or buffer is empty */
@@ -162,7 +185,7 @@ int tty_driver_read(void *buf, size_t count)
         /* Non-canonical mode */
         uint32_t min_chars = t->c_cc[6] > 0 ? t->c_cc[6] : 1;
         while (((console_tty.head - console_tty.tail + TTY_BUF_SIZE) % TTY_BUF_SIZE) < min_chars) {
-            wait_queue_sleep(&console_tty.read_wq);
+            wait_queue_sleep_locked(&console_tty.read_wq);
         }
 
         while (read_bytes < count && console_tty.head != console_tty.tail) {
@@ -171,16 +194,23 @@ int tty_driver_read(void *buf, size_t count)
             cbuf[read_bytes++] = ch;
         }
     }
+    spin_unlock_irqrestore(&console_tty.lock, flags);
 
     return (int)read_bytes;
 }
 
 bool tty_has_input(void)
 {
+    uint64_t flags;
+    spin_lock_irqsave(&console_tty.lock, &flags);
+    bool r;
     if ((console_tty.termios.c_lflag & 0x0002) /* ICANON */) {
-        return commit_count != 0;
+        r = (commit_count != 0);
+    } else {
+        r = (console_tty.head != console_tty.tail);
     }
-    return console_tty.head != console_tty.tail;
+    spin_unlock_irqrestore(&console_tty.lock, flags);
+    return r;
 }
 
 int tty_ioctl(uint64_t req, void *argp)

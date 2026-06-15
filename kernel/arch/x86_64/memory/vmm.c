@@ -1,6 +1,7 @@
 #include <arch/x86_64/vmm.h>
 #include <sched/task.h>
 #include <arch/x86_64/cpu.h>
+#include <arch/x86_64/smp.h>
 #include <kernel/panic.h>
 #include <kernel/printk.h>
 #include <lib/string.h>
@@ -181,6 +182,25 @@ int vmm_unmap(struct address_space *space, virt_addr_t virt)
 
     *pte = 0;
     invlpg(virt);
+
+    /* Phase 5: TLB shootdown across the rest of the CPUs. Publish
+     * the vaddr to every other CPU's g_tlb_queue[] and then
+     * broadcast IPI_VECTOR_TLB_SHOOTDOWN. Each receiver drains its
+     * own queue and does invlpg for each pending address. The
+     * publish-before-IPI ordering is guaranteed on x86: the LAPIC
+     * IPI write serializes, so the receiver sees the queue entry
+     * writes that happened before the IPI.
+     *
+     * Gated on g_cpu_count > 1 to keep the single-CPU path free of
+     * LAPIC MMIO and ring writes. We only shoot down if the unmapped
+     * page lived in the kernel PML4 (i.e., this is the kernel's
+     * own address space, not a per-process space). Per-process
+     * unmaps don't need cross-CPU shootdown because process
+     * spaces are not shared. */
+    if (g_cpu_count > 1 && space == vmm_kernel_address_space()) {
+        tlb_shootdown_publish_all_others(virt);
+        smp_broadcast_ipi_excluding_self(IPI_VECTOR_TLB_SHOOTDOWN);
+    }
     return 0;
 }
 
@@ -270,22 +290,22 @@ struct address_space *vmm_clone_address_space(struct address_space *parent)
 
                     virt_addr_t virt = (pml4_i << 39) | (pdpt_i << 30) | (pd_i << 21) | (pt_i << 12);
 
-                    phys_addr_t child_phys = pmm_alloc_page();
-                    if (child_phys == 0) {
-                        vmm_destroy_address_space(child);
-                        return 0;
-                    }
-
                     phys_addr_t parent_phys = entry_phys(pt[pt_i]);
-                    memcpy(phys_to_virt(child_phys), phys_to_virt(parent_phys), VMM_PAGE_SIZE);
-
                     uint64_t flags = pt[pt_i] & PAGE_FLAGS_MASK;
 
-                    if (vmm_map(child, virt, child_phys, flags) != 0) {
-                        pmm_free_page(child_phys);
+                    if (flags & VMM_WRITABLE) {
+                        flags &= ~VMM_WRITABLE;
+                        flags |= VMM_COW;
+                        pt[pt_i] = (pt[pt_i] & ~PAGE_FLAGS_MASK) | flags;
+                        invlpg(virt);
+                    }
+
+                    if (vmm_map(child, virt, parent_phys, flags) != 0) {
                         vmm_destroy_address_space(child);
                         return 0;
                     }
+
+                    pmm_ref_page(parent_phys);
                 }
             }
         }
@@ -294,6 +314,51 @@ struct address_space *vmm_clone_address_space(struct address_space *parent)
     return child;
 }
 
+int vmm_handle_cow(struct address_space *space, virt_addr_t virt)
+{
+    if (space == 0) return -1;
+    virt_addr_t fault_page = virt & ~PAGE_OFFSET_MASK;
+
+    uint64_t *pte = walk_to_pte(space, fault_page, 0, false);
+    if (pte == 0 || (*pte & VMM_PRESENT) == 0) {
+        return -1;
+    }
+
+    if (!(*pte & VMM_COW)) {
+        return -1;
+    }
+
+    phys_addr_t old_phys = entry_phys(*pte);
+    uint16_t ref = pmm_get_page_ref(old_phys);
+
+    if (ref == 1) {
+        uint64_t flags = *pte & PAGE_FLAGS_MASK;
+        flags &= ~VMM_COW;
+        flags |= VMM_WRITABLE;
+        *pte = (*pte & ~PAGE_FLAGS_MASK) | flags;
+        invlpg(fault_page);
+        return 0;
+    } else if (ref > 1) {
+        phys_addr_t new_phys = pmm_alloc_page();
+        if (new_phys == 0) {
+            return -2;
+        }
+
+        memcpy(phys_to_virt(new_phys), phys_to_virt(old_phys), VMM_PAGE_SIZE);
+
+        uint64_t flags = *pte & PAGE_FLAGS_MASK;
+        flags &= ~VMM_COW;
+        flags |= VMM_WRITABLE;
+
+        *pte = new_phys | flags;
+        invlpg(fault_page);
+
+        pmm_free_page(old_phys);
+        return 0;
+    }
+
+    return -1;
+}
 
 void vmm_destroy_address_space(struct address_space *space)
 {
@@ -415,23 +480,36 @@ bool vmm_validate_user_ptr_ex(struct address_space *space, const void *ptr, size
         if ((*pte & VMM_USER) == 0) return false;
 
         if (require_write && (*pte & VMM_WRITABLE) == 0) {
-            /* If write is required but not set in PTE, check if VMA allows writing and update PTE flags */
-            if (current_task != 0 && current_task->process != 0 && current_task->process->address_space == space) {
-                struct process *proc = current_task->process;
-                struct vma *vma = 0;
-                for (int i = 0; i < VMA_MAX; i++) {
-                    if (proc->vmas[i].valid && page >= proc->vmas[i].start && page < proc->vmas[i].end) {
-                        vma = &proc->vmas[i];
-                        break;
-                    }
+            /*
+             * If the PTE is COW-marked, resolve COW first (this is what would
+             * happen on a userspace write fault). Then re-walk the PTE.
+             */
+            if ((*pte & VMM_COW) != 0) {
+                int cow_rc = vmm_handle_cow(space, page);
+                if (cow_rc == 0) {
+                    pte = walk_to_pte(space, page, 0, false);
                 }
-                if (vma != 0 && (vma->prot_flags & PROT_WRITE)) {
-                    if (vmm_protect(space, page, vma->flags) == 0) {
-                        pte = walk_to_pte(space, page, 0, false);
+            }
+
+            /* If write is required but not set in PTE, check if VMA allows writing and update PTE flags */
+            if (pte == 0 || (*pte & VMM_WRITABLE) == 0) {
+                if (current_task != 0 && current_task->process != 0 && current_task->process->address_space == space) {
+                    struct process *proc = current_task->process;
+                    struct vma *vma = 0;
+                    for (int i = 0; i < VMA_MAX; i++) {
+                        if (proc->vmas[i].valid && page >= proc->vmas[i].start && page < proc->vmas[i].end) {
+                            vma = &proc->vmas[i];
+                            break;
+                        }
+                    }
+                    if (vma != 0 && (vma->prot_flags & PROT_WRITE)) {
+                        if (vmm_protect(space, page, vma->flags) == 0) {
+                            pte = walk_to_pte(space, page, 0, false);
+                        }
                     }
                 }
             }
-            if ((*pte & VMM_WRITABLE) == 0) return false;
+            if (pte == 0 || (*pte & VMM_WRITABLE) == 0) return false;
         }
 
         if (page >= (last & ~PAGE_OFFSET_MASK)) break;

@@ -92,6 +92,54 @@ enum {
 
 #define LIMINE_KERNEL_FILE_REQUEST_ID_0 0xad97e90e83f1ed67ULL
 #define LIMINE_KERNEL_FILE_REQUEST_ID_1 0x31eb5d1c5ff23b69ULL
+#define LIMINE_FRAMEBUFFER_REQUEST_ID_0 0x9d5827dcd881dd75ULL
+#define LIMINE_FRAMEBUFFER_REQUEST_ID_1 0xa3148604f6fab11bULL
+
+struct limine_video_mode {
+    uint64_t pitch;
+    uint64_t width;
+    uint64_t height;
+    uint16_t bpp;
+    uint8_t memory_model;
+    uint8_t red_mask_size;
+    uint8_t red_mask_shift;
+    uint8_t green_mask_size;
+    uint8_t green_mask_shift;
+    uint8_t blue_mask_size;
+    uint8_t blue_mask_shift;
+} PACKED;
+
+struct limine_framebuffer {
+    void *address;
+    uint64_t width;
+    uint64_t height;
+    uint64_t pitch;
+    uint16_t bpp;
+    uint8_t memory_model;
+    uint8_t red_mask_size;
+    uint8_t red_mask_shift;
+    uint8_t green_mask_size;
+    uint8_t green_mask_shift;
+    uint8_t blue_mask_size;
+    uint8_t blue_mask_shift;
+    uint8_t unused[7];
+    uint64_t edid_size;
+    void *edid;
+    uint64_t mode_count;
+    struct limine_video_mode **modes;
+} PACKED;
+
+struct limine_framebuffer_response {
+    uint64_t revision;
+    uint64_t framebuffer_count;
+    struct limine_framebuffer **framebuffers;
+};
+
+struct limine_framebuffer_request {
+    uint64_t id[4];
+    uint64_t revision;
+    struct limine_framebuffer_response *response;
+} PACKED;
 
 struct limine_kernel_file_response {
     uint64_t revision;
@@ -108,5 +156,6 @@ extern volatile struct limine_bootloader_info_request bootloader_info_request;
 extern volatile struct limine_memmap_request memmap_request;
 extern volatile struct limine_hhdm_request hhdm_request;
 extern volatile struct limine_kernel_file_request kernel_file_request;
+extern volatile struct limine_framebuffer_request framebuffer_request;
 
 #endif

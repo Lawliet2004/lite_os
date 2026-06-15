@@ -1,9 +1,34 @@
 #define SYSCALL_TRACE
 #include <sys/syscall.h>
 #include <sys/syscall_table.h>
+#include <kernel/panic.h>
 #include <kernel/printk.h>
 #include <sched/task.h>
 
+/* Phase 33: kernel canary as a stack-corruption tripwire. The
+ * syscall dispatcher touches the kernel stack and many kernel
+ * data structures on every user→kernel transition. A simple
+ * canary in BSS, checked on every syscall, catches:
+ *   - stack overflows in the syscall path that scribble into
+ *     the canary's address (a compiler/linker bug or a missed
+ *     bounds check)
+ *   - ROP gadgets that pivot the stack into BSS
+ *   - any code that overwrites a "do not touch" sentinel
+ *
+ * Not a substitute for -fstack-protector (per-function canaries)
+ * which is disabled by the build flags; it's a coarse catch-all
+ * for the syscall path. The value is volatile so the compiler
+ * doesn't elide the read. */
+static volatile uint64_t kernel_canary = 0xDEADBEEFCAFEBABEULL;
+
+#define KERNEL_CANARY_EXPECTED 0xDEADBEEFCAFEBABEULL
+
+static inline void kernel_canary_check(void)
+{
+    if (kernel_canary != KERNEL_CANARY_EXPECTED) {
+        panic("kernel canary corrupted (possible stack overflow or BSS scribble)");
+    }
+}
 
 /* ------------------------------------------------------------------ */
 /* Human-readable syscall name lookup                                  */
@@ -488,6 +513,9 @@ void syscall_table_init(void)
 
 int64_t syscall_dispatch(struct syscall_frame *frame)
 {
+    /* Phase 33: tripwire for stack corruption in the syscall path. */
+    kernel_canary_check();
+
     uint64_t nr = frame->rax;
     int64_t ret;
 

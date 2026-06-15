@@ -1,5 +1,6 @@
 #include <arch/x86_64/syscall_entry.h>
 #include <arch/x86_64/gdt.h>
+#include <arch/x86_64/smp.h>
 #include <kernel/printk.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -10,14 +11,16 @@
  */
 extern void syscall_handler(void);
 
-/* BSP per-CPU CPU context */
-static struct cpu_context bsp_cpu_context;
-
 bool cpu_smap_supported = false;
 
 void syscall_set_kernel_rsp(uint64_t rsp)
 {
-    bsp_cpu_context.kernel_stack = rsp;
+    /*
+     * For Phase 1 only the BSP is online, so g_cpu_data[0] is always
+     * "the current CPU". The runtime GS-base per-CPU dispatch will be
+     * enabled in Phase 4 when smp_current_cpu() becomes meaningful.
+     */
+    g_cpu_data[0].kernel_stack = rsp;
 }
 
 static void wrmsr(uint32_t msr, uint64_t value)
@@ -36,9 +39,12 @@ static uint64_t rdmsr(uint32_t msr)
 
 void syscall_init(void)
 {
-    /* Since we boot in kernel mode, MSR_GS_BASE (active GS base) points to bsp_cpu_context,
-       and MSR_KERNEL_GS_BASE (swapped user GS base) starts as 0. */
-    wrmsr(MSR_GS_BASE, (uint64_t)(uintptr_t)&bsp_cpu_context);
+    /*
+     * The per-CPU GS base must point to g_cpu_data[0] on the BSP before
+     * any user-mode SYSCALL can execute. The smp_init() path will also
+     * update MSR_GS_BASE on each AP once the LAPIC is online.
+     */
+    wrmsr(MSR_GS_BASE, (uint64_t)(uintptr_t)&g_cpu_data[0]);
     wrmsr(MSR_KERNEL_GS_BASE, 0);
 
     /* Enable SCE bit in EFER */

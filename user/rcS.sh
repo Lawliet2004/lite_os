@@ -9,29 +9,37 @@ echo "----------------------------------------"
 # mount -t sysfs sys /sys
 # mount -t tmpfs tmp /tmp
 
-# 2. Configure networking
+# 2. Set hostname (either /etc/hostname or DHCP later will set /proc/sys/kernel/hostname)
 if [ -f "/etc/hostname" ]; then
     hostname $(cat /etc/hostname)
 fi
 
-echo "Configuring static IP for eth0..."
-/sbin/ifconfig eth0 10.0.2.15 netmask 255.255.255.0 gw 10.0.2.2 2>/dev/null
+# 3. Start the kernel log daemon early so messages from the rest of the
+#    boot (services, etc.) are persisted to /var/log/kern.log.
+/sbin/klogd --daemon
+echo "klogd started"
 
-# 3. Launch enabled background services
-ENABLED_FILE="/etc/services.enabled"
-if [ -f "$ENABLED_FILE" ]; then
-    echo "Launching enabled services..."
-    while read -r svc; do
-        if [ -n "$svc" ]; then
-            /sbin/service "$svc" start
-        fi
-    done < "$ENABLED_FILE"
-else
-    # Fallback to defaults if no enabled file
-    echo "Launching default services..."
-    /sbin/service udp_echo start
-    /sbin/service http_server start
+# 4. Configure networking — try DHCP first, fall back to static if no server
+echo "Attempting DHCP on eth0..."
+/sbin/dhcpcd 2>/dev/null
+if [ $? -ne 0 ]; then
+    echo "DHCP failed, using static configuration..."
+    /sbin/ifconfig eth0 10.0.2.15 netmask 255.255.255.0 gw 10.0.2.2
 fi
+
+# 5. Start every service in /etc/services.enabled in dependency order
+#    (AFTER="..." in each .conf). The new /sbin/svc understands
+#    service definitions under /etc/services.available.
+echo "Starting enabled services..."
+/sbin/svc start-enabled
+
+# 6. Start the respawn supervisor so crashed services come back.
+echo "Starting service supervisor..."
+/sbin/supervisor --daemon
+echo "supervisor started"
+
+# 7. Record a marker so external log analyzers know boot finished
+/bin/logger "LiteNix boot complete"
 
 echo "System initialization complete!"
 echo "----------------------------------------"
