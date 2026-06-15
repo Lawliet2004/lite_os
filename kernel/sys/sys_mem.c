@@ -7,8 +7,9 @@
  *      The heap_start is set by the ELF loader (page-aligned end of BSS).
  *      heap_end tracks the current program break.
  *
- * mmap: anonymous private mappings only (MAP_ANONYMOUS|MAP_PRIVATE).
- *       File-backed and shared mappings return -ENOSYS (Phase 23).
+ * mmap: anonymous private and file-backed private mappings.
+ *       Shared mappings are validated, then return -ENOSYS until shared
+ *       page-cache/writeback semantics exist.
  */
 #include <sys/syscall.h>
 #include <sys/syscall_table.h>
@@ -285,9 +286,20 @@ int64_t sys_mmap(struct syscall_frame *frame)
 
     struct process *proc = current_task->process;
 
-    /* Reject MAP_SHARED for now (not yet implemented) */
-    if (flags & MAP_SHARED) {
-        return -(int64_t)ENOSYS;
+    bool map_shared = (flags & MAP_SHARED) != 0;
+    bool map_private = (flags & MAP_PRIVATE) != 0;
+    if (map_shared == map_private) {
+        return -(int64_t)EINVAL;
+    }
+    if (length == 0) return -(int64_t)EINVAL;
+    if (length > UINT64_MAX - 0xfff) return -(int64_t)EINVAL;
+    uint64_t aligned_len = page_align_up(length);
+    if (addr + aligned_len < addr) return -(int64_t)EINVAL;
+    if (flags & MAP_FIXED) {
+        if (addr & 0xfff) return -(int64_t)EINVAL;
+        if (addr < VMM_USER_BASE || addr + aligned_len > VMM_USER_TOP) {
+            return -(int64_t)EINVAL;
+        }
     }
 
     /* Handle file-backed mappings */
@@ -312,24 +324,13 @@ int64_t sys_mmap(struct syscall_frame *frame)
             return -(int64_t)EINVAL;
         }
 
-        /* length must be > 0 */
-        if (length == 0) {
-            return -(int64_t)EINVAL;
-        }
-
-        /* Check for overflow */
-        uint64_t aligned_len = page_align_up(length);
-        if (addr + aligned_len < addr) {
-            return -(int64_t)EINVAL;
+        if (map_shared) {
+            return -(int64_t)ENOSYS;
         }
 
         uint64_t map_addr;
 
         if (flags & MAP_FIXED) {
-            if (addr & 0xfff) return -(int64_t)EINVAL;
-            if (addr < VMM_USER_BASE || addr + aligned_len > VMM_USER_TOP) {
-                return -(int64_t)EINVAL;
-            }
             map_addr = addr;
 
             /* munmap any existing mappings in that range first */
@@ -350,7 +351,7 @@ int64_t sys_mmap(struct syscall_frame *frame)
         if (!(prot & PROT_EXEC)) vflags |= VMM_NO_EXECUTE;
 
         /* For MAP_PRIVATE with PROT_WRITE, we map read-only initially (COW) */
-        if ((flags & MAP_PRIVATE) && (prot & PROT_WRITE)) {
+        if (map_private && (prot & PROT_WRITE)) {
             vflags &= ~VMM_WRITABLE;
         }
 
@@ -384,18 +385,16 @@ int64_t sys_mmap(struct syscall_frame *frame)
         return (int64_t)map_addr;
     }
 
-    /* Anonymous-only path continues */
+    if (map_shared) {
+        return -(int64_t)ENOSYS;
+    }
 
-    if (length == 0) return -(int64_t)EINVAL;
-    uint64_t aligned_len = page_align_up(length);
-    if (addr + aligned_len < addr) return -(int64_t)EINVAL;
+    /* Anonymous-only path continues */
 
     /* proc already declared above */
     uint64_t map_addr;
 
     if (flags & MAP_FIXED) {
-        if (addr & 0xfff) return -(int64_t)EINVAL;
-        if (addr < VMM_USER_BASE || addr + aligned_len > VMM_USER_TOP) return -(int64_t)EINVAL;
         map_addr = addr;
 
         /* munmap any existing mappings in that range first */

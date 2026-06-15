@@ -231,6 +231,31 @@ int symlink(const char *target, const char *linkpath)
     return (int)syscall2(88, (int64_t)target, (int64_t)linkpath);
 }
 
+int chmod_libc(const char *pathname, uint32_t mode)
+{
+    return (int)syscall2(90, (int64_t)pathname, (int64_t)mode);
+}
+
+int fchmod_libc(int fd, uint32_t mode)
+{
+    return (int)syscall2(91, (int64_t)fd, (int64_t)mode);
+}
+
+int chown_libc(const char *pathname, int32_t owner, int32_t group)
+{
+    return (int)syscall3(92, (int64_t)pathname, (int64_t)owner, (int64_t)group);
+}
+
+int fchown_libc(int fd, int32_t owner, int32_t group)
+{
+    return (int)syscall3(93, (int64_t)fd, (int64_t)owner, (int64_t)group);
+}
+
+uint32_t umask_libc(uint32_t mask)
+{
+    return (uint32_t)syscall1(95, (int64_t)mask);
+}
+
 /* ------------------------------------------------------------------ */
 /* Process                                                              */
 /* ------------------------------------------------------------------ */
@@ -531,6 +556,19 @@ char *strchr(const char *s, int c)
     return (c == '\0') ? (char *)s : 0;
 }
 
+char *strstr(const char *haystack, const char *needle)
+{
+    if (!haystack || !needle) return 0;
+    if (needle[0] == '\0') return (char *)haystack;
+    size_t nlen = strlen(needle);
+    for (const char *p = haystack; *p; p++) {
+        if (strncmp(p, needle, nlen) == 0 && p[nlen] == 0) {
+            return (char *)p;
+        }
+    }
+    return 0;
+}
+
 void *memset(void *dest, int value, size_t count)
 {
     unsigned char *d = dest;
@@ -553,6 +591,27 @@ int memcmp(const void *s1, const void *s2, size_t n)
         if (a[i] != b[i]) return a[i] - b[i];
     }
     return 0;
+}
+
+void *memmove(void *dest, const void *src, size_t count)
+{
+    unsigned char *d = dest;
+    const unsigned char *s = src;
+    if (d < s) {
+        for (size_t i = 0; i < count; i++) d[i] = s[i];
+    } else {
+        for (size_t i = count; i > 0; i--) d[i - 1] = s[i - 1];
+    }
+    return dest;
+}
+
+void _exit(int status)
+{
+    /* SYS_exit_group is preferred for "process and all threads
+     * terminate" but our libc-lite is single-threaded per process, so
+     * SYS_exit suffices. */
+    syscall1(60, (int64_t)status);
+    for (;;) __asm__ volatile ("hlt");
 }
 
 /* ------------------------------------------------------------------ */
@@ -579,7 +638,14 @@ static int print_number_to_buf(char *out, size_t out_size, size_t *pos,
         }
     }
     if (is_neg) {
-        if (out && *pos < out_size - 1) out[(*pos)++] = '-';
+        if (out && *pos < out_size - 1) {
+            out[(*pos)++] = '-';
+        } else if (!out) {
+            /* printf path: write the sign to stdout directly because
+             * the buffer we're accumulating into is NULL. */
+            char dash = '-';
+            (void)write(1, &dash, 1);
+        }
     }
     while (i > 0) {
         i--;
@@ -660,6 +726,11 @@ static int vsnprintf_impl(char *buf, size_t size, const char *fmt, va_list args)
             case 'x': {
                 unsigned int val = va_arg(args, unsigned int);
                 print_number_to_buf(buf, size, &pos, val, 16, false);
+                break;
+            }
+            case 'o': {
+                unsigned int val = va_arg(args, unsigned int);
+                print_number_to_buf(buf, size, &pos, val, 8, false);
                 break;
             }
             case 'p': {
@@ -776,4 +847,557 @@ ssize_t recvfrom(int sockfd, void *buf, size_t len, int flags, struct sockaddr *
 int reboot(int cmd)
 {
     return (int)syscall3(169, 0xfee1dead, 672274793, (int64_t)cmd);
+}
+
+uint32_t getuid(void)  { return (uint32_t)syscall0(102); }
+uint32_t getgid(void)  { return (uint32_t)syscall0(104); }
+uint32_t geteuid(void) { return (uint32_t)syscall0(107); }
+uint32_t getegid(void) { return (uint32_t)syscall0(108); }
+
+/* ------------------------------------------------------------------ */
+/* Number parsing                                                       */
+/* ------------------------------------------------------------------ */
+
+static int is_space(int c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f'; }
+
+unsigned long strtoul(const char *s, char **endptr, int base)
+{
+    unsigned long v = 0;
+    while (is_space((unsigned char)*s)) s++;
+    if (base == 0) {
+        if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) { base = 16; s += 2; }
+        else if (s[0] == '0') { base = 8; s++; }
+        else base = 10;
+    } else if (base == 16 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) {
+        s += 2;
+    }
+    while (*s) {
+        int d;
+        if (*s >= '0' && *s <= '9') d = *s - '0';
+        else if (*s >= 'a' && *s <= 'z') d = *s - 'a' + 10;
+        else if (*s >= 'A' && *s <= 'Z') d = *s - 'A' + 10;
+        else break;
+        if (d >= base) break;
+        v = v * (unsigned long)base + (unsigned long)d;
+        s++;
+    }
+    if (endptr) *endptr = (char *)s;
+    return v;
+}
+
+long strtol(const char *s, char **endptr, int base)
+{
+    int neg = 0;
+    while (is_space((unsigned char)*s)) s++;
+    if (*s == '+') s++;
+    else if (*s == '-') { neg = 1; s++; }
+    unsigned long v = strtoul(s, endptr, base);
+    return neg ? -(long)v : (long)v;
+}
+
+int atoi(const char *s)
+{
+    return (int)strtol(s, 0, 10);
+}
+
+char *strsep_inplace(char **stringp, int delim)
+{
+    if (!stringp || !*stringp) return 0;
+    char *start = *stringp;
+    char *p = start;
+    while (*p && *p != delim) p++;
+    if (*p == delim) { *p = '\0'; *stringp = p + 1; }
+    else { *stringp = 0; }
+    return start;
+}
+
+/* ------------------------------------------------------------------ */
+/* read_line: read until '\n' or EOF or buf-full                       */
+/* ------------------------------------------------------------------ */
+
+ssize_t read_line(int fd, char *buf, size_t size)
+{
+    if (size == 0) return 0;
+    size_t pos = 0;
+    while (pos + 1 < size) {
+        char c;
+        ssize_t n = read(fd, &c, 1);
+        if (n <= 0) {
+            if (pos == 0 && n <= 0) return (n < 0) ? -1 : (ssize_t)pos;
+            break;
+        }
+        if (c == '\n') break;
+        if (c == '\r') continue;
+        buf[pos++] = c;
+    }
+    buf[pos] = '\0';
+    return (ssize_t)pos;
+}
+
+/* ------------------------------------------------------------------ */
+/* SHA-256                                                              */
+/* ------------------------------------------------------------------ */
+
+static const uint32_t sha256_k[64] = {
+    0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
+    0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
+    0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
+    0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
+    0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
+    0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+    0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
+    0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2
+};
+
+static uint32_t rotr32(uint32_t x, unsigned n) { return (x >> n) | (x << (32 - n)); }
+
+static void sha256_compress(uint32_t state[8], const uint8_t block[64])
+{
+    uint32_t w[64];
+    for (int i = 0; i < 16; i++) {
+        w[i] = ((uint32_t)block[i*4] << 24) | ((uint32_t)block[i*4+1] << 16)
+             | ((uint32_t)block[i*4+2] << 8) | (uint32_t)block[i*4+3];
+    }
+    for (int i = 16; i < 64; i++) {
+        uint32_t s0 = rotr32(w[i-15], 7) ^ rotr32(w[i-15], 18) ^ (w[i-15] >> 3);
+        uint32_t s1 = rotr32(w[i-2], 17) ^ rotr32(w[i-2], 19) ^ (w[i-2] >> 10);
+        w[i] = w[i-16] + s0 + w[i-7] + s1;
+    }
+    uint32_t a=state[0],b=state[1],c=state[2],d=state[3],e=state[4],f=state[5],g=state[6],h=state[7];
+    for (int i = 0; i < 64; i++) {
+        uint32_t S1 = rotr32(e, 6) ^ rotr32(e, 11) ^ rotr32(e, 25);
+        uint32_t ch = (e & f) ^ ((~e) & g);
+        uint32_t t1 = h + S1 + ch + sha256_k[i] + w[i];
+        uint32_t S0 = rotr32(a, 2) ^ rotr32(a, 13) ^ rotr32(a, 22);
+        uint32_t mj = (a & b) ^ (a & c) ^ (b & c);
+        uint32_t t2 = S0 + mj;
+        h = g; g = f; f = e; e = d + t1; d = c; c = b; b = a; a = t1 + t2;
+    }
+    state[0]+=a; state[1]+=b; state[2]+=c; state[3]+=d;
+    state[4]+=e; state[5]+=f; state[6]+=g; state[7]+=h;
+}
+
+void sha256(const void *data, size_t len, uint8_t out32[32])
+{
+    uint32_t state[8] = {
+        0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,
+        0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19
+    };
+    const uint8_t *p = (const uint8_t *)data;
+    size_t full_blocks = len / 64;
+    for (size_t i = 0; i < full_blocks; i++) sha256_compress(state, p + i * 64);
+
+    uint8_t tail[128];
+    size_t rem = len - full_blocks * 64;
+    memcpy(tail, p + full_blocks * 64, rem);
+    tail[rem] = 0x80;
+    size_t pad_len = (rem + 1 <= 56) ? 64 : 128;
+    for (size_t i = rem + 1; i < pad_len - 8; i++) tail[i] = 0;
+    uint64_t bits = (uint64_t)len * 8;
+    for (int i = 0; i < 8; i++) tail[pad_len - 1 - i] = (uint8_t)(bits >> (i * 8));
+    sha256_compress(state, tail);
+    if (pad_len == 128) sha256_compress(state, tail + 64);
+
+    for (int i = 0; i < 8; i++) {
+        out32[i*4]   = (uint8_t)(state[i] >> 24);
+        out32[i*4+1] = (uint8_t)(state[i] >> 16);
+        out32[i*4+2] = (uint8_t)(state[i] >> 8);
+        out32[i*4+3] = (uint8_t)(state[i]);
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* Password hashing                                                     */
+/* Hash format: $5$<salt>$<hex64>                                      */
+/* Implementation: SHA-256( salt || password ) iterated 5000 times      */
+/* (Simplified vs glibc crypt — sufficient for distro-level use.)       */
+/* ------------------------------------------------------------------ */
+
+static const char hex_chars[] = "0123456789abcdef";
+
+void pw_hash(const char *password, const char *salt, char *out, size_t out_size)
+{
+    if (out_size < 16) { if (out_size) out[0] = 0; return; }
+
+    /* Cap salt length so the per-round feed buffer can never overflow. */
+    size_t slen = strlen(salt);
+    if (slen > 64) slen = 64;
+    size_t plen = strlen(password);
+    if (plen > 128) plen = 128;
+
+    uint8_t buf[256];
+    memcpy(buf, salt, slen);
+    memcpy(buf + slen, password, plen);
+
+    uint8_t digest[32];
+    sha256(buf, slen + plen, digest);
+    for (int round = 0; round < 4999; round++) {
+        uint8_t feed[32 + 64];
+        memcpy(feed, digest, 32);
+        memcpy(feed + 32, salt, slen);
+        sha256(feed, 32 + slen, digest);
+    }
+
+    char hex[65];
+    for (int i = 0; i < 32; i++) {
+        hex[i*2]   = hex_chars[(digest[i] >> 4) & 0xF];
+        hex[i*2+1] = hex_chars[digest[i] & 0xF];
+    }
+    hex[64] = 0;
+
+    /* Build the capped salt copy for the formatted output. */
+    char salt_capped[65];
+    memcpy(salt_capped, salt, slen);
+    salt_capped[slen] = 0;
+    snprintf(out, out_size, "$5$%s$%s", salt_capped, hex);
+}
+
+int pw_verify(const char *password, const char *stored_hash)
+{
+    if (!stored_hash || stored_hash[0] == 0) {
+        /* empty hash = no password required */
+        return password[0] == 0 ? 1 : 0;
+    }
+    if (stored_hash[0] == '!' || stored_hash[0] == '*') {
+        /* account locked */
+        return 0;
+    }
+    if (strncmp(stored_hash, "$5$", 3) != 0) {
+        /* legacy / unsupported - reject */
+        return 0;
+    }
+    /* extract salt between $5$ and the next $ */
+    const char *salt_start = stored_hash + 3;
+    const char *salt_end = strchr(salt_start, '$');
+    if (!salt_end) return 0;
+    size_t salt_len = (size_t)(salt_end - salt_start);
+    if (salt_len == 0 || salt_len > 64) return 0;
+
+    char salt[65];
+    memcpy(salt, salt_start, salt_len);
+    salt[salt_len] = 0;
+
+    char recomputed[160];
+    pw_hash(password, salt, recomputed, sizeof(recomputed));
+    return strcmp(recomputed, stored_hash) == 0 ? 1 : 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* /etc/passwd and /etc/shadow parsing                                  */
+/* ------------------------------------------------------------------ */
+
+static int parse_passwd_line(char *line, struct passwd_ent *out)
+{
+    char *p = line;
+    char *name = strsep_inplace(&p, ':');
+    char *pw   = strsep_inplace(&p, ':');
+    char *uid  = strsep_inplace(&p, ':');
+    char *gid  = strsep_inplace(&p, ':');
+    char *gec  = strsep_inplace(&p, ':');
+    char *hom  = strsep_inplace(&p, ':');
+    char *shl  = p;
+    if (!name || !pw || !uid || !gid || !hom || !shl) return -1;
+
+    memset(out, 0, sizeof(*out));
+    strncpy(out->name, name, sizeof(out->name) - 1);
+    strncpy(out->passwd_field, pw, sizeof(out->passwd_field) - 1);
+    out->uid = (uint32_t)atoi(uid);
+    out->gid = (uint32_t)atoi(gid);
+    if (gec) strncpy(out->gecos, gec, sizeof(out->gecos) - 1);
+    strncpy(out->home, hom, sizeof(out->home) - 1);
+    strncpy(out->shell, shl, sizeof(out->shell) - 1);
+    return 0;
+}
+
+static int passwd_iter(int (*pred)(const struct passwd_ent *, void *), void *ctx, struct passwd_ent *out)
+{
+    int fd = open("/etc/passwd", O_RDONLY);
+    if (fd < 0) return -1;
+    /* Use static buffer to avoid stack/uaccess edge cases with large user reads */
+    static char buf[2048];
+    ssize_t n = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    if (n <= 0) return -1;
+    buf[n] = 0;
+
+    char *line = buf;
+    while (*line) {
+        char *nl = strchr(line, '\n');
+        if (nl) *nl = 0;
+        if (line[0] && line[0] != '#') {
+            char tmp[512];
+            strncpy(tmp, line, sizeof(tmp) - 1);
+            tmp[sizeof(tmp) - 1] = 0;
+            struct passwd_ent ent;
+            if (parse_passwd_line(tmp, &ent) == 0) {
+                if (pred(&ent, ctx)) {
+                    *out = ent;
+                    return 0;
+                }
+            }
+        }
+        if (!nl) break;
+        line = nl + 1;
+    }
+    return -1;
+}
+
+static int pred_by_name(const struct passwd_ent *e, void *ctx) { return strcmp(e->name, (const char *)ctx) == 0; }
+static int pred_by_uid(const struct passwd_ent *e, void *ctx) { return e->uid == *(uint32_t *)ctx; }
+
+int pwent_by_name(const char *name, struct passwd_ent *out)
+{
+    return passwd_iter(pred_by_name, (void *)name, out);
+}
+
+int pwent_by_uid(uint32_t uid, struct passwd_ent *out)
+{
+    return passwd_iter(pred_by_uid, &uid, out);
+}
+
+static int parse_shadow_line(char *line, struct shadow_ent *out)
+{
+    char *p = line;
+    char *name = strsep_inplace(&p, ':');
+    char *hash = strsep_inplace(&p, ':');
+    if (!name || !hash) return -1;
+    memset(out, 0, sizeof(*out));
+    strncpy(out->name, name, sizeof(out->name) - 1);
+    strncpy(out->hash, hash, sizeof(out->hash) - 1);
+
+    char *f;
+    f = strsep_inplace(&p, ':'); if (f && *f) out->last_change  = (uint64_t)strtoul(f, 0, 10);
+    f = strsep_inplace(&p, ':'); if (f && *f) out->min_age      = (uint64_t)strtoul(f, 0, 10);
+    f = strsep_inplace(&p, ':'); if (f && *f) out->max_age      = (uint64_t)strtoul(f, 0, 10);
+    f = strsep_inplace(&p, ':'); if (f && *f) out->warn_period  = (uint64_t)strtoul(f, 0, 10);
+    f = strsep_inplace(&p, ':'); if (f && *f) out->inactive     = (uint64_t)strtoul(f, 0, 10);
+    f = strsep_inplace(&p, ':'); if (f && *f) out->expire       = (uint64_t)strtoul(f, 0, 10);
+    return 0;
+}
+
+int shent_by_name(const char *name, struct shadow_ent *out)
+{
+    int fd = open("/etc/shadow", O_RDONLY);
+    if (fd < 0) return -1;
+    static char buf[2048];
+    ssize_t n = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    if (n <= 0) return -1;
+    buf[n] = 0;
+
+    char *line = buf;
+    while (*line) {
+        char *nl = strchr(line, '\n');
+        if (nl) *nl = 0;
+        if (line[0] && line[0] != '#') {
+            char tmp[1024];
+            strncpy(tmp, line, sizeof(tmp) - 1);
+            tmp[sizeof(tmp) - 1] = 0;
+            struct shadow_ent ent;
+            if (parse_shadow_line(tmp, &ent) == 0 && strcmp(ent.name, name) == 0) {
+                *out = ent;
+                return 0;
+            }
+        }
+        if (!nl) break;
+        line = nl + 1;
+    }
+    return -1;
+}
+
+int shent_set_hash(const char *name, const char *new_hash)
+{
+    int fd = open("/etc/shadow", O_RDONLY);
+    if (fd < 0) return -1;
+    static char buf[2048];
+    ssize_t n = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    if (n <= 0) return -1;
+    buf[n] = 0;
+
+    static char out_buf[2048];
+    size_t op = 0;
+    int replaced = 0;
+    char *line = buf;
+    while (*line) {
+        char *nl = strchr(line, '\n');
+        if (nl) *nl = 0;
+        if (line[0] && line[0] != '#') {
+            char tmp[1024];
+            strncpy(tmp, line, sizeof(tmp) - 1);
+            tmp[sizeof(tmp) - 1] = 0;
+            char *p = tmp;
+            char *e_name = strsep_inplace(&p, ':');
+            (void)strsep_inplace(&p, ':');         /* old hash discarded */
+            char *rest = p ? p : (char *)"";       /* remainder of line */
+            if (e_name && strcmp(e_name, name) == 0) {
+                op += snprintf(out_buf + op, sizeof(out_buf) - op, "%s:%s:%s\n", e_name, new_hash, rest);
+                replaced = 1;
+            } else {
+                /* reassemble untouched */
+                op += snprintf(out_buf + op, sizeof(out_buf) - op, "%s\n", line);
+            }
+        } else if (line[0]) {
+            op += snprintf(out_buf + op, sizeof(out_buf) - op, "%s\n", line);
+        } else {
+            op += snprintf(out_buf + op, sizeof(out_buf) - op, "\n");
+        }
+        if (!nl) break;
+        line = nl + 1;
+    }
+    if (!replaced) {
+        op += snprintf(out_buf + op, sizeof(out_buf) - op, "%s:%s:0:0:99999:7:::\n", name, new_hash);
+    }
+
+    /* Atomic-ish: write to /etc/shadow.new then rename. We preserve the
+     * original /etc/shadow mode/ownership so the file does not become
+     * world-readable after the update. */
+    struct stat orig_st;
+    int have_orig = (stat("/etc/shadow", &orig_st) == 0);
+
+    int wfd = open("/etc/shadow.new", O_WRONLY | O_CREAT | O_TRUNC);
+    if (wfd < 0) return -1;
+    ssize_t w = write(wfd, out_buf, op);
+    close(wfd);
+    if (w != (ssize_t)op) { unlink("/etc/shadow.new"); return -1; }
+
+    /* Match the original file's mode bits before swapping in. */
+    if (have_orig) {
+        chmod_libc("/etc/shadow.new", orig_st.st_mode & 07777);
+    } else {
+        chmod_libc("/etc/shadow.new", 0600);
+    }
+
+    if (rename("/etc/shadow.new", "/etc/shadow") != 0) {
+        /* Fallback to direct write if rename unsupported on this fs */
+        int dfd = open("/etc/shadow", O_WRONLY | O_CREAT | O_TRUNC);
+        if (dfd < 0) return -1;
+        ssize_t w2 = write(dfd, out_buf, op);
+        close(dfd);
+        unlink("/etc/shadow.new");
+        if (w2 != (ssize_t)op) return -1;
+        if (have_orig) chmod_libc("/etc/shadow", orig_st.st_mode & 07777);
+        else chmod_libc("/etc/shadow", 0600);
+    }
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Terminal echo control                                                */
+/* ------------------------------------------------------------------ */
+
+#define ECHO_FLAG    0x00000008
+#define ICANON_FLAG  0x00000002
+
+int term_echo_off(int fd, struct termios *saved)
+{
+    if (!saved) return -1;
+    if (ioctl(fd, TCGETS, saved) != 0) return -1;
+    struct termios t = *saved;
+    t.c_lflag &= ~(ECHO_FLAG);
+    return ioctl(fd, TCSETS, &t);
+}
+
+int term_echo_restore(int fd, const struct termios *saved)
+{
+    if (!saved) return -1;
+    return ioctl(fd, TCSETS, (struct termios *)saved);
+}
+
+/* ------------------------------------------------------------------ */
+/* Salt generation: 8 URL-safe chars from /dev/urandom or getrandom    */
+/* ------------------------------------------------------------------ */
+
+void gen_salt(char *out, size_t size)
+{
+    static const char alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789./";
+    if (size == 0) return;
+    size_t want = size - 1;
+    if (want > 16) want = 16;
+    uint8_t rnd[16];
+    ssize_t n = getrandom(rnd, want, 0);
+    if (n < (ssize_t)want) {
+        /* Fallback to a counter — not secure, but deterministic */
+        struct timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        for (size_t i = 0; i < want; i++) rnd[i] = (uint8_t)(ts.tv_nsec >> (i * 4));
+    }
+    for (size_t i = 0; i < want; i++) out[i] = alphabet[rnd[i] & 0x3F];
+    out[want] = 0;
+}
+
+int dhcp_parse_reply(const void *pkt, size_t pkt_len,
+                     const void *opts, size_t opts_len,
+                     uint32_t expected_xid, struct dhcp_lease *out_lease)
+{
+    if (!pkt || pkt_len < sizeof(struct dhcp_packet_hdr)) return -1;
+    const struct dhcp_packet_hdr *h = (const struct dhcp_packet_hdr *)pkt;
+    if (h->op != DHCP_OP_BOOTREPLY) return -1;
+    if (h->magic != DHCP_MAGIC_COOKIE) return -1;
+    if (h->xid != expected_xid) return -1;
+
+    memset(out_lease, 0, sizeof(*out_lease));
+    memcpy(out_lease->your_ip, h->yiaddr, 4);
+
+    const uint8_t *p = (const uint8_t *)opts;
+    size_t i = 0;
+    while (i < opts_len) {
+        uint8_t code = p[i++];
+        if (code == DHCP_OPT_END) break;
+        if (i >= opts_len) break;
+        uint8_t len = p[i++];
+        if (i + len > opts_len) break;
+
+        switch (code) {
+        case DHCP_OPT_MSG_TYPE:
+            if (len >= 1) out_lease->msg_type = p[i];
+            break;
+        case DHCP_OPT_SERVER_ID:
+            if (len == 4) { memcpy(out_lease->server_id, p + i, 4); out_lease->has_server_id = true; }
+            break;
+        case DHCP_OPT_SUBNET_MASK:
+            if (len == 4) { memcpy(out_lease->subnet_mask, p + i, 4); out_lease->has_subnet_mask = true; }
+            break;
+        case DHCP_OPT_ROUTER:
+            if (len >= 4) { memcpy(out_lease->router, p + i, 4); out_lease->has_router = true; }
+            break;
+        case DHCP_OPT_DNS:
+            if (len >= 4) { memcpy(out_lease->dns, p + i, 4); out_lease->has_dns = true; }
+            break;
+        case DHCP_OPT_LEASE_TIME:
+            if (len == 4) {
+                out_lease->lease_seconds = ((uint32_t)p[i]   << 24) | ((uint32_t)p[i+1] << 16) |
+                                            ((uint32_t)p[i+2] << 8)  |  (uint32_t)p[i+3];
+            }
+            break;
+        case DHCP_OPT_RENEWAL:
+            if (len == 4) {
+                out_lease->t1_seconds = ((uint32_t)p[i]   << 24) | ((uint32_t)p[i+1] << 16) |
+                                          ((uint32_t)p[i+2] << 8)  |  (uint32_t)p[i+3];
+            }
+            break;
+        case DHCP_OPT_REBIND:
+            if (len == 4) {
+                out_lease->t2_seconds = ((uint32_t)p[i]   << 24) | ((uint32_t)p[i+1] << 16) |
+                                          ((uint32_t)p[i+2] << 8)  |  (uint32_t)p[i+3];
+            }
+            break;
+        case DHCP_OPT_HOSTNAME:
+            if (len < sizeof(out_lease->hostname)) {
+                memcpy(out_lease->hostname, p + i, len);
+                out_lease->hostname[len] = 0;
+                out_lease->has_hostname = true;
+            }
+            break;
+        case DHCP_OPT_DOMAIN_NAME:
+            if (len < sizeof(out_lease->domain)) {
+                memcpy(out_lease->domain, p + i, len);
+                out_lease->domain[len] = 0;
+                out_lease->has_domain = true;
+            }
+            break;
+        }
+        i += len;
+    }
+    return 0;
 }

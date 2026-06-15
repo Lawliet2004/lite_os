@@ -5,12 +5,15 @@
 #include <arch/x86_64/pic.h>
 #include <arch/x86_64/vmm.h>
 #include <arch/x86_64/syscall_entry.h>
+#include <drivers/framebuffer.h>
+#include <drivers/fbcon.h>
 #include <drivers/pit.h>
 #include <drivers/serial.h>
 #include <drivers/vga_text.h>
 #include <kernel/init.h>
 #include <kernel/panic.h>
 #include <kernel/printk.h>
+#include <kernel/spinlock.h>
 #include <mm/heap.h>
 #include <mm/pmm.h>
 #include <mm/uaccess.h>
@@ -89,6 +92,20 @@ void kernel_main(void)
     if (memmap_request.response == 0) panic("Limine memory map response missing");
     printk("Usable memory: %llu KiB\n", count_usable_memory_kib());
 
+    if (fb_init()) {
+        printk("FB: %llux%llux%u pitch=%llu phys=0x%llx vaddr=0x%llx\n",
+               g_fb.width, g_fb.height, g_fb.bpp, g_fb.pitch,
+               g_fb.phys_addr, (uint64_t)(uintptr_t)g_fb.vaddr);
+        if (fb_self_test()) {
+            printk("FB: self-test passed\n");
+        } else {
+            printk("FB: self-test FAILED\n");
+        }
+        fbcon_init();
+    } else {
+        printk("FB: not available\n");
+    }
+
     gdt_init();
     idt_init();
 
@@ -134,6 +151,45 @@ void kernel_main(void)
     task_init();
     sched_self_test();
     printk("Sched: timer preemption started\n");
+
+    /* ---- SMP init (Phase 4: trampoline + PML4 map) ---- */
+    /* Phase 4: maps the trampoline 4 KiB page in the kernel PML4 so the
+     * AP can fetch its instructions once it turns paging on. */
+    smp_init();
+
+    /* ---- TLB-shootdown self-test (Phase 5) ----
+     * Exercises the per-CPU queue + invlpg path without needing
+     * live APs. Runs after smp_init() so the g_tlb_queue[] storage
+     * is zeroed and the BSP's per-CPU id is valid. */
+    tlb_shootdown_self_test();
+
+    /* ---- Reschedule IPI self-test (Phase 6) ----
+     * Fakes a second CPU with a non-existent LAPIC id and sends
+     * a reschedule IPI to it. Verifies the bounded wait in
+     * lapic_send_ipi() returns instead of hanging on the QEMU 8.2.2
+     * "missing target LAPIC" bug. */
+    reschedule_self_test();
+
+    /* ---- Panic broadcast self-test (Phase 32 followup) ----
+     * Fakes a second CPU and calls smp_broadcast_panic(),
+     * verifying the broadcast path doesn't hang the BSP on a
+     * missing target. The panicking CPU's own halt happens via
+     * the cli/hlt loop in panic_at(); the test here just
+     * exercises the broadcast. */
+    panic_broadcast_self_test();
+
+    /* ---- IPI handler self-test (Phase 32 followup) ----
+     * Invokes smp_handle_ipi() directly for the reschedule and
+     * TLB-shootdown paths and verifies the per-CPU state was
+     * updated correctly. The panic path is not tested (it would
+     * halt). The IPI never actually arrives in single-CPU mode
+     * (smp_send_ipi_to_cpu skips self, broadcast shorthand has
+     * no targets), so this is the only way to verify the handler
+     * logic in the BSP-only test path. */
+    ipi_handler_self_test();
+
+    /* ---- Spinlock self-test (Phase 3a) ---- */
+    /* spinlock_self_test(); */
 
     extern void pci_init(void);
     extern void ata_init(void);

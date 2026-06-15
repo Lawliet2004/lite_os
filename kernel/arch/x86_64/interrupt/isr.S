@@ -48,9 +48,32 @@ ISR_NO_ERROR 25
 ISR_NO_ERROR 26
 ISR_NO_ERROR 27
 ISR_NO_ERROR 28
-ISR_ERROR 29
-ISR_ERROR 30
+ISR_NO_ERROR 29
+ISR_NO_ERROR 30
 ISR_NO_ERROR 31
+
+; Phase 3d: IPI stubs. The LAPIC delivers inter-processor interrupts
+; by writing the IPI's vector to the ICR and pulsing the local APIC.
+; The vector is the same as any IDT entry, so the LAPIC's vector
+; field selects the IDT gate and we end up here. Each IPI has a
+; dedicated stub so the C-side dispatcher can branch on the vector
+; in a single load — no per-IPI handler-array lookup needed.
+;
+; The IPI handlers expect to run on a CPU that's already in long
+; mode with the kernel page tables loaded, so we don't swapgs (the
+; sender already did; if it didn't, the receiver is the BSP, which
+; is fine because the BSP's GS_BASE is the kernel per-CPU data). */
+%macro IPI_NO_ERROR 1
+global isr_ipi%1
+isr_ipi%1:
+    push qword 0
+    push qword (0x40 + %1)
+    jmp isr_ipi_common
+%endmacro
+
+IPI_NO_ERROR 0      ; vector 0x40 - reschedule
+IPI_NO_ERROR 1      ; vector 0x41 - TLB shootdown
+IPI_NO_ERROR 2      ; vector 0x42 - panic
 
 %macro IRQ 2
 global irq%1
@@ -165,6 +188,52 @@ irq_common:
     jz .kernel_exit
     swapgs
 .kernel_exit:
+
+    pop rax
+    pop rbx
+    pop rcx
+    pop rdx
+    pop rbp
+    pop rdi
+    pop rsi
+    pop r8
+    pop r9
+    pop r10
+    pop r11
+    pop r12
+    pop r13
+    pop r14
+    pop r15
+
+    add rsp, 16
+    iretq
+
+; Phase 3d: IPI common path. See top of file for the design.
+global isr_ipi_common
+extern ipi_dispatch
+
+isr_ipi_common:
+    push r15
+    push r14
+    push r13
+    push r12
+    push r11
+    push r10
+    push r9
+    push r8
+    push rsi
+    push rdi
+    push rbp
+    push rdx
+    push rcx
+    push rbx
+    push rax
+
+    mov rdi, rsp
+    mov r15, rsp
+    and rsp, -16
+    call ipi_dispatch
+    mov rsp, r15
 
     pop rax
     pop rbx

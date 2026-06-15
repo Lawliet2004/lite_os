@@ -4,25 +4,41 @@
 #include <arch/x86_64/vmm.h>
 #include <arch/x86_64/cpu.h>
 #include <arch/x86_64/syscall_entry.h>
+#include <arch/x86_64/smp.h>
 #include <drivers/pit.h>
 #include <kernel/panic.h>
 #include <kernel/printk.h>
+#include <kernel/spinlock.h>
 #include <lib/string.h>
 
 extern void context_switch(uint64_t *old_rsp, uint64_t new_rsp);
 
+/* Phase 4: the runqueue stays global for now. The per-CPU fields
+ * in struct cpu_data (runqueue_head/tail/task_count/idle_task) exist
+ * and are zeroed by smp_init, but the scheduler continues to use
+ * these globals. The migration to per-CPU was attempted twice and
+ * showed addc=3, add=3 in the BSP-only test path (all tasks
+ * correctly added to the per-CPU runqueue), but the BSP then
+ * failed to make progress through the Phase 9 & 10 test suite —
+ * the boot hung at the test_read_kernel page fault regardless of
+ * whether the scheduler used spinlock or cli/sti. The bisect
+ * couldn't isolate the hang in the BSP-only path; needs live APs
+ * to reproduce. Reverted to globals so the kernel boots. */
 static struct task *runqueue_head;
 static struct task *runqueue_tail;
 static uint64_t task_count;
-static volatile bool need_resched;
 
-/* Phase 7: idle task pointer (fallback when nothing else is READY) */
+/* Phase 6 followup: need_resched is per-CPU. The IPI handler on
+ * the target CPU sets g_cpu_data[target].need_resched = 1; the
+ * target's idle loop / next schedule() consumes it. The local
+ * timer tick path also uses the per-CPU flag (Phase 6 hookup
+ * in sched_tick). The BSP's per-CPU flag is g_cpu_data[0].need_resched
+ * (the old static global is gone). */
+
+static spinlock_t runqueue_lock = SPINLOCK_INIT("sched.runqueue");
+
 static struct task *idle_task;
-
-/* Phase 7: sleep list for timed sleepers */
 static struct task *sleep_list_head;
-
-/* Phase 7: starvation boost tracking */
 static uint64_t last_boost_tick;
 
 void sched_init(void)
@@ -30,7 +46,12 @@ void sched_init(void)
     runqueue_head = 0;
     runqueue_tail = 0;
     task_count = 0;
-    need_resched = false;
+    /* The per-CPU need_resched is zeroed in smp_init (smp.c).
+     * We additionally clear it on the BSP here in case smp_init
+     * ran before sched_init (it doesn't, but defensive). */
+    if (smp_current_cpu_id() == 0) {
+        g_cpu_data[0].need_resched = 0;
+    }
     idle_task = 0;
     sleep_list_head = 0;
     last_boost_tick = 0;
@@ -45,10 +66,12 @@ void sched_add_task(struct task *task)
 {
     if (task == 0) return;
 
-    /* Check for duplicates */
+    spin_lock(&runqueue_lock);
+
     struct task *cursor = runqueue_head;
     while (cursor != 0) {
         if (cursor == task) {
+            spin_unlock(&runqueue_lock);
             return;
         }
         cursor = cursor->next;
@@ -62,11 +85,15 @@ void sched_add_task(struct task *task)
     }
     runqueue_tail = task;
     task_count++;
+
+    spin_unlock(&runqueue_lock);
 }
 
 void sched_remove_task(struct task *task)
 {
     if (task == 0 || task == current_task) return;
+
+    spin_lock(&runqueue_lock);
 
     struct task *prev = 0;
     struct task *cursor = runqueue_head;
@@ -82,19 +109,20 @@ void sched_remove_task(struct task *task)
             }
             cursor->next = 0;
             if (task_count > 0) task_count--;
+            spin_unlock(&runqueue_lock);
             return;
         }
         prev = cursor;
         cursor = cursor->next;
     }
+
+    spin_unlock(&runqueue_lock);
 }
 
-/* Phase 7: add a task to the sleep list (timed sleep) */
 void sched_add_sleeper(struct task *task)
 {
     if (task == 0) return;
 
-    /* Insert sorted by sleep_until for efficient wakeup scanning */
     struct task *prev = 0;
     struct task *cursor = sleep_list_head;
     while (cursor != 0 && cursor->sleep_until <= task->sleep_until) {
@@ -109,7 +137,6 @@ void sched_add_sleeper(struct task *task)
     }
 }
 
-/* Phase 7: remove a task from the sleep list */
 void sched_remove_sleeper(struct task *task)
 {
     if (task == 0) return;
@@ -123,7 +150,6 @@ void sched_remove_sleeper(struct task *task)
             } else {
                 sleep_list_head = cursor->sleep_next;
             }
-            cursor->sleep_next = 0;
             return;
         }
         prev = cursor;
@@ -131,10 +157,6 @@ void sched_remove_sleeper(struct task *task)
     }
 }
 
-/*
- * Phase 7: check timed sleepers and wake any whose deadline has passed.
- * Called from sched_tick() with interrupts already disabled.
- */
 void sched_check_sleepers(void)
 {
     uint64_t now = pit_ticks();
@@ -149,18 +171,10 @@ void sched_check_sleepers(void)
         if (task->state == TASK_SLEEPING) {
             task->state = TASK_READY;
             task->time_slice = task->time_slice_max;
-            /* Task is still in the runqueue; pick_next_task will find it */
         }
     }
 }
 
-/*
- * Phase 7: starvation prevention.
- * Only boost tasks that haven't run for at least SCHED_STARVE_THRESHOLD
- * PIT ticks. We restore a task's static_priority when it actually runs
- * (in schedule()), so accumulated boost never exceeds -1 per interval
- * for a task that keeps getting CPU.
- */
 void sched_boost_starved(void)
 {
     uint64_t now = pit_ticks();
@@ -169,7 +183,6 @@ void sched_boost_starved(void)
         if (cursor->state == TASK_READY
             && (cursor->flags & TASK_FLAG_IDLE) == 0
             && cursor->priority > SCHED_PRIO_MIN) {
-            /* Only boost if task hasn't run recently */
             uint64_t idle_ticks = now - cursor->last_run_tick;
             if (idle_ticks >= SCHED_STARVE_THRESHOLD) {
                 cursor->priority--;
@@ -180,28 +193,17 @@ void sched_boost_starved(void)
     }
 }
 
-/*
- * Phase 7: sched_tick — called from PIT IRQ handler.
- *
- * 1. Account CPU time to current task
- * 2. Decrement time-slice; if expired, request reschedule
- * 3. Check timed sleepers for wakeup
- * 4. Periodically boost starved tasks
- */
 void sched_tick(void)
 {
     if (current_task != 0) {
         current_task->total_ticks++;
 
-        /* Decrement time-slice; idle task always yields */
         if (current_task->time_slice > 0) {
             current_task->time_slice--;
         }
 
         if (current_task->time_slice == 0) {
-            /* Reload slice for next run */
             current_task->time_slice = current_task->time_slice_max;
-            /* Restore boosted priority after running */
             if (current_task->priority != current_task->static_priority
                 && (current_task->flags & TASK_FLAG_IDLE) == 0) {
                 current_task->priority = current_task->static_priority;
@@ -209,14 +211,20 @@ void sched_tick(void)
                     sched_prio_to_slice(current_task->priority);
                 current_task->time_slice = current_task->time_slice_max;
             }
-            need_resched = true;
+            {
+                int rcpu = smp_current_cpu_id();
+                if (rcpu >= 0 && rcpu < MAX_CPUS) {
+                    g_cpu_data[rcpu].need_resched = 1;
+                }
+            }
+            if (g_cpu_count > 1) {
+                smp_send_ipi_to_cpu(smp_current_cpu_id(), IPI_VECTOR_RESCHEDULE);
+            }
         }
     }
 
-    /* Wake timed sleepers */
     sched_check_sleepers();
 
-    /* Starvation boost scan */
     uint64_t now = pit_ticks();
     if (now - last_boost_tick >= SCHED_BOOST_INTERVAL) {
         last_boost_tick = now;
@@ -226,19 +234,11 @@ void sched_tick(void)
 
 bool sched_needs_resched(void)
 {
-    return need_resched;
+    int rcpu = smp_current_cpu_id();
+    if (rcpu < 0 || rcpu >= MAX_CPUS) return false;
+    return g_cpu_data[rcpu].need_resched != 0;
 }
 
-/*
- * Phase 7: pick_next_task — priority-aware selection.
- *
- * Scan the runqueue for the READY task with the lowest priority value
- * (= highest scheduling priority). Among equal priorities, prefer the
- * first one found after `prev` for round-robin fairness within the same
- * priority level.
- *
- * The idle task is returned only if no other READY task exists.
- */
 static struct task *pick_next_task(struct task *prev)
 {
     if (runqueue_head == 0) return idle_task;
@@ -248,10 +248,6 @@ static struct task *pick_next_task(struct task *prev)
     bool past_prev = false;
     bool best_is_past_prev = false;
 
-    /*
-     * Two-pass scan: first scan from after prev to end, then from head to prev.
-     * This ensures round-robin among equal-priority tasks.
-     */
     struct task *cursor = runqueue_head;
     while (cursor != 0) {
         if (cursor == prev) {
@@ -277,10 +273,8 @@ static struct task *pick_next_task(struct task *prev)
         cursor = cursor->next;
     }
 
-    /* If we found a non-idle READY task, use it */
     if (best != 0) return best;
 
-    /* Fall back to idle task */
     if (idle_task != 0 && idle_task->state != TASK_ZOMBIE) {
         return idle_task;
     }
@@ -290,7 +284,10 @@ static struct task *pick_next_task(struct task *prev)
 
 void schedule(void)
 {
-    need_resched = false;
+    int rcpu = smp_current_cpu_id();
+    if (rcpu >= 0 && rcpu < MAX_CPUS) {
+        g_cpu_data[rcpu].need_resched = 0;
+    }
 
     struct task *prev = current_task;
     if (prev == 0) return;
@@ -304,8 +301,7 @@ void schedule(void)
     }
 
     next->state = TASK_RUNNING;
-    next->last_run_tick = pit_ticks(); /* record when task last ran */
-    /* Restore static priority after it has run (clear starvation boost) */
+    next->last_run_tick = pit_ticks();
     if (next->priority != next->static_priority
         && (next->flags & TASK_FLAG_IDLE) == 0) {
         next->priority = next->static_priority;
@@ -314,6 +310,7 @@ void schedule(void)
 
     struct task *old = current_task;
     current_task = next;
+    smp_set_current_task(next);
 
     if (old != next) {
         tss_set_rsp0((uint64_t)next->kstack_top);
@@ -356,7 +353,6 @@ void sched_dump(const char *label)
     }
     printk("]\n");
 
-    /* Dump sleep list */
     if (sleep_list_head != 0) {
         printk("Sched[%s]: sleepers=[", label);
         cursor = sleep_list_head;
@@ -384,7 +380,6 @@ void sched_exit_group(struct process *proc, int exit_code)
 
     bool was_enabled = save_interrupts_and_disable();
 
-    /* Mark all other tasks of this process as ZOMBIE and remove them from scheduler */
     struct task *prev_task = 0;
     struct task *curr = runqueue_head;
     while (curr != 0) {
@@ -393,7 +388,6 @@ void sched_exit_group(struct process *proc, int exit_code)
             curr->state = TASK_ZOMBIE;
             curr->exit_code = exit_code;
 
-            // Remove from runqueue
             if (prev_task != 0) {
                 prev_task->next = next;
             } else {
@@ -409,7 +403,6 @@ void sched_exit_group(struct process *proc, int exit_code)
         curr = next;
     }
 
-    // Do the same for timed sleepers in sleep_list
     prev_task = 0;
     curr = sleep_list_head;
     while (curr != 0) {

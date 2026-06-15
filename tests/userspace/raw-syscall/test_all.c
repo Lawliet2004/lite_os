@@ -11,7 +11,7 @@
  * Syscalls exercised in this file:
  *   write, exit_group, read, openat, close, newfstatat,
  *   brk, mmap, munmap, getpid, gettid, uname,
- *   clock_gettime, nanosleep, getrandom.
+ *   clock_gettime, nanosleep, getrandom, mount, umount2.
  */
 
 typedef long long          int64_t;
@@ -92,10 +92,13 @@ static inline int64_t _sc6(int64_t nr,
 #define SYS_exit_group    231
 #define SYS_fork          57
 #define SYS_wait4         61
+#define SYS_mount        165
+#define SYS_umount2      166
 
 /* Flags / constants */
 #define AT_FDCWD      (-100)
 #define O_RDONLY      0
+#define MAP_SHARED    0x01
 #define MAP_PRIVATE   0x02
 #define MAP_ANONYMOUS 0x20
 #define MAP_FIXED     0x10
@@ -111,6 +114,8 @@ static inline int64_t _sc6(int64_t nr,
 #define ENOENT  2
 #define EFAULT  14
 #define EINVAL  22
+#define ENOTDIR 20
+#define ENOSYS  38
 
 /* ================================================================== */
 /* Structs                                                             */
@@ -276,7 +281,40 @@ static void test_stat(void)
     check(r == -(int64_t)EFAULT, "newfstatat NULL buf != -EFAULT");
 }
 
-/* ---- 4. brk ---- */
+/* ---- 4. mount + umount2 unsupported behavior ---- */
+static void test_mount_umount(void)
+{
+    test_begin("mount+umount2");
+
+    int64_t r = _sc6(SYS_mount,
+                     (int64_t)(size_t)"/dev/hda",
+                     (int64_t)(size_t)"/no_such_mount_target",
+                     (int64_t)(size_t)"ext2",
+                     0, 0, 0);
+    check(r == -(int64_t)ENOENT, "mount missing target != -ENOENT");
+
+    r = _sc6(SYS_mount,
+             (int64_t)(size_t)"/dev/hda",
+             (int64_t)(size_t)"/hello.txt",
+             (int64_t)(size_t)"ext2",
+             0, 0, 0);
+    check(r == -(int64_t)ENOTDIR, "mount non-directory target != -ENOTDIR");
+
+    r = _sc6(SYS_mount,
+             (int64_t)(size_t)"/dev/hda",
+             (int64_t)(size_t)"/",
+             (int64_t)(size_t)"ext2",
+             0, 0, 0);
+    check(r == -(int64_t)ENOSYS, "mount supported-looking request did not return -ENOSYS");
+
+    r = _sc2(SYS_umount2, (int64_t)(size_t)"/", 0x100);
+    check(r == -(int64_t)EINVAL, "umount2 bad flags != -EINVAL");
+
+    r = _sc2(SYS_umount2, 0, 0);
+    check(r == -(int64_t)EFAULT, "umount2 NULL target != -EFAULT");
+}
+
+/* ---- 5. brk ---- */
 static void test_brk(void)
 {
     test_begin("brk");
@@ -296,7 +334,7 @@ static void test_brk(void)
     check(ret == init_brk, "brk shrink failed");
 }
 
-/* ---- 5. mmap + munmap ---- */
+/* ---- 6. mmap + munmap ---- */
 #define SYS_mprotect      10
 static void test_mmap(void)
 {
@@ -321,6 +359,18 @@ static void test_mmap(void)
     /* 2. mmap with length=0 must return -EINVAL */
     int64_t r = _sc6(SYS_mmap, 0, 0, PROT_READ, MAP_PRIVATE|MAP_ANONYMOUS, -1LL, 0);
     check(r == -(int64_t)EINVAL, "mmap(len=0) != -EINVAL");
+
+    r = _sc6(SYS_mmap, 0, 0, PROT_READ, MAP_SHARED|MAP_ANONYMOUS, -1LL, 0);
+    check(r == -(int64_t)EINVAL, "mmap(MAP_SHARED,len=0) != -EINVAL");
+
+    r = _sc6(SYS_mmap, 0, 4096, PROT_READ, MAP_SHARED|MAP_ANONYMOUS, -1LL, 0);
+    check(r == -(int64_t)ENOSYS, "mmap(MAP_SHARED|MAP_ANONYMOUS) != -ENOSYS");
+
+    r = _sc6(SYS_mmap, 1, 4096, PROT_READ, MAP_SHARED|MAP_ANONYMOUS|MAP_FIXED, -1LL, 0);
+    check(r == -(int64_t)EINVAL, "mmap(MAP_SHARED|MAP_FIXED,bad addr) != -EINVAL");
+
+    r = _sc6(SYS_mmap, 0, 4096, PROT_READ, MAP_SHARED, -1LL, 0);
+    check(r == -(int64_t)EBADF, "mmap(MAP_SHARED,bad fd) != -EBADF");
 
     /* 3. munmap the region */
     r = _sc2(SYS_munmap, maddr, 65536);
@@ -424,7 +474,7 @@ static void test_mmap(void)
     check(r == 0, "munmap overlapping failed");
 }
 
-/* ---- 6. getpid + gettid ---- */
+/* ---- 7. getpid + gettid ---- */
 static void test_pid_tid(void)
 {
     test_begin("getpid+gettid");
@@ -437,7 +487,7 @@ static void test_pid_tid(void)
     check(tid >= pid, "gettid < getpid");
 }
 
-/* ---- 7. uname ---- */
+/* ---- 8. uname ---- */
 static void test_uname(void)
 {
     test_begin("uname");
@@ -454,7 +504,7 @@ static void test_uname(void)
     check(r == -(int64_t)EFAULT, "uname(NULL) != -EFAULT");
 }
 
-/* ---- 8. clock_gettime + nanosleep ---- */
+/* ---- 9. clock_gettime + nanosleep ---- */
 static void test_clock(void)
 {
     test_begin("clock_gettime+nanosleep");
@@ -484,7 +534,7 @@ static void test_clock(void)
           "clock_gettime(NULL) did not return -EFAULT/-EINVAL");
 }
 
-/* ---- 9. getrandom ---- */
+/* ---- 10. getrandom ---- */
 static void test_getrandom(void)
 {
     test_begin("getrandom");
@@ -521,6 +571,7 @@ void _start(void)
     test_write();
     test_read_openat();
     test_stat();
+    test_mount_umount();
     test_brk();
     test_mmap();
     test_pid_tid();

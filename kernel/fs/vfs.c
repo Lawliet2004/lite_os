@@ -261,7 +261,7 @@ static int tty_write(struct vfs_node *node, size_t offset, const void *buf, size
     return console->write(console, offset, buf, count);
 }
 
-#define KMSG_BUF_SIZE 16384
+#define KMSG_BUF_SIZE (64 * 1024)
 static char kmsg_buf[KMSG_BUF_SIZE];
 static uint64_t kmsg_total_written = 0;
 
@@ -496,6 +496,40 @@ static int proc_net_config_read(struct vfs_node *node, size_t offset, void *buf,
     return (int)copy;
 }
 
+/* ------------------------------------------------------------------ */
+/* /proc/sys/kernel/hostname                                            */
+/* ------------------------------------------------------------------ */
+
+char kernel_hostname[65] = "litenix";
+
+static int proc_hostname_read(struct vfs_node *node, size_t offset, void *buf, size_t count)
+{
+    (void)node;
+    size_t len = strlen(kernel_hostname);
+    if (offset >= len) return 0;
+    size_t avail = len - offset;
+    size_t copy = count < avail ? count : avail;
+    memcpy(buf, kernel_hostname + offset, copy);
+    return (int)copy;
+}
+
+static int proc_hostname_write(struct vfs_node *node, size_t offset, const void *buf, size_t count)
+{
+    (void)node; (void)offset;
+    /* ponytail: root-only; per Linux this needs CAP_SYS_ADMIN */
+    if (current_task == 0 || current_task->process == 0 || current_task->process->euid != 0)
+        return -EPERM;
+    if (count == 0) return 0;
+    size_t len = count < 64 ? count : 64;
+    memcpy(kernel_hostname, buf, len);
+    kernel_hostname[len] = '\0';
+    /* Strip a trailing newline so "hostname foo\n" works */
+    if (len > 0 && kernel_hostname[len - 1] == '\n') {
+        kernel_hostname[len - 1] = '\0';
+    }
+    return (int)count;
+}
+
 static bool parse_ip_bytes(const char *str, uint8_t *out)
 {
     int val = 0;
@@ -521,6 +555,9 @@ static bool parse_ip_bytes(const char *str, uint8_t *out)
 static int proc_net_config_write(struct vfs_node *node, size_t offset, const void *buf, size_t count)
 {
     (void)node; (void)offset;
+    /* ponytail: root-only; arbitrary IP/gw change by an unprivileged user is a remote-pivot primitive */
+    if (current_task == 0 || current_task->process == 0 || current_task->process->euid != 0)
+        return -EPERM;
     extern uint8_t my_ip[4];
     extern uint8_t my_gateway[4];
     extern uint8_t my_mask[4];
@@ -631,6 +668,8 @@ static int proc_pid_status_read(struct vfs_node *node, size_t offset, void *buf,
     memcpy(buf, msg + offset, copy);
     return (int)copy;
 }
+
+static int proc_mounts_read(struct vfs_node *node, size_t offset, void *buf, size_t count);
 
 static struct process *get_process_at_index(struct process *root, size_t *current_index, size_t target_index)
 {
@@ -766,16 +805,22 @@ void vfs_setup_pseudo_filesystems(void)
         proc_node->readdir = proc_dir_readdir;
     }
 
-    // Create /proc/version, cpuinfo, meminfo, uptime, stat
+    // Create /proc/version, cpuinfo, meminfo, uptime, stat, mounts
     vfs_create_device("/proc/version", proc_version_read, 0);
     vfs_create_device("/proc/cpuinfo", proc_cpuinfo_read, 0);
     vfs_create_device("/proc/meminfo", proc_meminfo_read, 0);
     vfs_create_device("/proc/uptime", proc_uptime_read, 0);
     vfs_create_device("/proc/stat", proc_stat_read, 0);
+    vfs_create_device("/proc/mounts", proc_mounts_read, 0);
 
     // Create /proc/net directory and config device
     vfs_create_file("/proc/net", VFS_TYPE_DIR, 0, 0);
     vfs_create_device("/proc/net/config", proc_net_config_read, proc_net_config_write);
+
+    // Create /proc/sys/kernel/hostname
+    vfs_create_file("/proc/sys", VFS_TYPE_DIR, 0, 0);
+    vfs_create_file("/proc/sys/kernel", VFS_TYPE_DIR, 0, 0);
+    vfs_create_device("/proc/sys/kernel/hostname", proc_hostname_read, proc_hostname_write);
 
     // Create /proc/self directory and status
     vfs_create_file("/proc/self", VFS_TYPE_DIR, 0, 0);
@@ -1327,6 +1372,49 @@ void file_close(struct file *f)
 /* ------------------------------------------------------------------ */
 
 static struct mount_entry mount_table[MOUNT_MAX];
+
+static void append_limited(char *dst, size_t dst_sz, size_t *len, const char *src)
+{
+    if (dst_sz == 0 || *len >= dst_sz - 1 || src == 0) return;
+    while (*src != '\0' && *len < dst_sz - 1) {
+        dst[*len] = *src;
+        (*len)++;
+        src++;
+    }
+    dst[*len] = '\0';
+}
+
+static int proc_mounts_read(struct vfs_node *node, size_t offset, void *buf, size_t count)
+{
+    (void)node;
+    char msg[4096];
+    size_t len = 0;
+    bool any = false;
+
+    msg[0] = '\0';
+
+    for (int i = 0; i < MOUNT_MAX; i++) {
+        if (!mount_table[i].valid) continue;
+        any = true;
+        const char *fstype = mount_table[i].fstype[0] ? mount_table[i].fstype : "unknown";
+
+        append_limited(msg, sizeof(msg), &len, "none ");
+        append_limited(msg, sizeof(msg), &len, mount_table[i].mountpoint);
+        append_limited(msg, sizeof(msg), &len, " ");
+        append_limited(msg, sizeof(msg), &len, fstype);
+        append_limited(msg, sizeof(msg), &len, " rw 0 0\n");
+    }
+
+    if (!any) {
+        append_limited(msg, sizeof(msg), &len, "rootfs / rootfs rw 0 0\n");
+    }
+
+    if (offset >= len) return 0;
+    size_t avail = len - offset;
+    size_t copy = count < avail ? count : avail;
+    memcpy(buf, msg + offset, copy);
+    return (int)copy;
+}
 
 void vfs_mount_table_init(void)
 {

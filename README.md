@@ -23,12 +23,37 @@ Linux-like userspace support. It is transitioning from a "teaching kernel" to a
 - **Init System**: `/bin/init` executes a full verification suite and starts a shell.
 - **Shell**: BusyBox `sh` with core applets (`ls`, `cat`, `mkdir`, `rm`, `cp`, `echo`).
 - **Filesystem**: Persistent EXT2 read/write on ATA disk (verified).
-- **Networking**: ARP, IPv4, ICMP, UDP (Echo Server), TCP (Basic HTTP Server).
+- **Networking**: ARP, IPv4, ICMP, UDP (Echo Server), TCP (Basic HTTP Server),
+  `/sbin/dhcpcd` (DHCPv4 client), `/bin/hostname` backed by
+  `/proc/sys/kernel/hostname`. `rcS.sh` prefers DHCP then falls back to a
+  static `10.0.2.15` address. See [docs/network.md](docs/network.md).
+- **Logging**: `/sbin/klogd` tails the kernel's 16 KiB `/dev/kmsg` ring
+  buffer into `/var/log/kern.log` with timestamps; `/bin/logger`
+  writes userspace messages to the kernel ring. `rcS.sh` starts
+  klogd as a daemon and records a boot-completion marker. See
+  [docs/logging.md](docs/logging.md).
+- **Service supervision**: `/sbin/svc` is a C-based service
+  controller (start/stop/restart/status/log/describe/tree/check/list/enable/disable)
+  that parses `/etc/services.available/<name>.conf` files and
+  honours `AFTER="..."` dependency ordering. `/sbin/supervisor`
+  is a small respawn daemon that watches PID files and re-runs
+  any `RESPAWN="yes"` service whose pid is dead. `rcS.sh` calls
+  `svc start-enabled` then daemonises the supervisor. See
+  [docs/supervisor.md](docs/supervisor.md).
+- **User Management**: `/etc/passwd` + `/etc/shadow` with `$5$` SHA-256 hashed
+  passwords, real `login`/`passwd`/`su`/`id`/`whoami`/`useradd`/`userdel`,
+  kernel-enforced privilege drops via `setresuid`/`setresgid`, full VFS
+  permission enforcement (mode-bit checks on open/unlink/mkdir/rename/chmod/
+  chown), and S_ISUID-bit exec so `/bin/login` works for non-root users.
+  See [docs/user-management.md](docs/user-management.md).
 
 ### Distro Capabilities (Experimental/Future)
 - **TTY/Signals**: Basic line discipline and signal handlers work; full job control (SIGTSTP) is future work.
-- **Permissions**: UID/GID model exists in kernel structs but enforcement is not yet implemented (UID 0 only).
-- **Packages**: No package manager yet.
+- **Permissions**: Full Unix mode-bit enforcement on open/unlink/mkdir/rename
+  /chmod/chown, setuid bit honored in execve, `/etc/shadow` is mode 0600 and
+  root-only-readable. Non-root users are properly sandboxed.
+- **Packages**: `lpkg` package manager exists (custom `.lpkg` format,
+  install/remove/verify/list); no remote signed repository yet.
 - **Build System**: Currently requires a host cross-toolchain (Zig/Clang/Nasm).
 
 It does not yet implement broad Linux application compatibility. Dynamic musl
@@ -164,6 +189,12 @@ For details, see [docs/distro-experience.md](docs/distro-experience.md).
 - `litenix-install`: Install the OS to persistent disk.
 - `lpkg`: Manage LiteNix packages.
 - `service`: Manage system services.
+- `login`, `passwd`, `su`, `useradd`, `userdel`: Multi-user management
+  (default root password is `root`, see [docs/user-management.md](docs/user-management.md)).
+- `hostname`, `ifconfig`, `dhcpcd`: Network configuration
+  (DHCP preferred, falls back to static; see [docs/network.md](docs/network.md)).
+- `klogd`, `logger`: Kernel ring buffer logging — see
+  [docs/logging.md](docs/logging.md).
 
 ## Next Step
 

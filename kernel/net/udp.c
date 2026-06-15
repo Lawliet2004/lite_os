@@ -1,6 +1,7 @@
 #include <net/net.h>
 #include <sched/wait_queue.h>
 #include <lib/string.h>
+#include <kernel/spinlock.h>
 
 extern struct socket socket_table[];
 extern void net_ipv4_send(const uint8_t dest_ip[4], uint8_t proto, const void *payload, uint16_t len);
@@ -17,6 +18,9 @@ void net_udp_receive(const uint8_t *src_ip, const void *data, uint16_t len)
 
     const uint8_t *payload = (const uint8_t *)data + sizeof(struct udp_hdr);
     uint16_t payload_len = udp_len - sizeof(struct udp_hdr);
+
+    uint64_t tflags; /* ponytail: hold socket_table_lock through table scan + buffer write */
+    spin_lock_irqsave(&socket_table_lock, &tflags);
 
     // Find destination socket
     for (int i = 0; i < 64; i++) {
@@ -65,6 +69,7 @@ void net_udp_receive(const uint8_t *src_ip, const void *data, uint16_t len)
             break;
         }
     }
+    spin_unlock_irqrestore(&socket_table_lock, tflags);
 }
 
 void net_udp_send(struct socket *sock, const uint8_t *dest_ip, uint16_t dest_port, const void *payload, uint16_t len)

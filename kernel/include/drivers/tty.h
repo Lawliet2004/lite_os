@@ -5,6 +5,7 @@
 #include <stddef.h>
 #include <stdbool.h>
 #include <sched/wait_queue.h>
+#include <kernel/spinlock.h>
 
 struct winsize {
     uint16_t ws_row;
@@ -33,6 +34,7 @@ struct tty_device {
     struct termios termios;
     uint32_t fg_pgid;
     uint32_t sid;
+    spinlock_t lock; /* ponytail: protects head/tail + the static commit_count/canon_len read path */
 };
 
 extern struct tty_device console_tty;

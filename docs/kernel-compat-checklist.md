@@ -42,6 +42,7 @@ Last updated: 2026-06-11
 
 - persistent ext2-backed `/persist`: implemented
 - mount table infrastructure: implemented
+- `/proc/mounts`: implemented from the VFS mount table, with a synthetic rootfs fallback
 - boot image mounts/layout for `/proc`, `/sys`, `/dev`, `/tmp`, `/run`: present
 - VFS permission checks: enforced on open/access/create/unlink/rename/chmod/chown paths
 - ext2 indirect blocks / large-file work: still incomplete

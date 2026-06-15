@@ -17,6 +17,7 @@
 #include <kernel/printk.h>
 #include <drivers/serial.h>
 #include <drivers/pit.h>
+#include <kernel/spinlock.h>
 
 typedef uint32_t mode_t;
 
@@ -28,6 +29,7 @@ typedef uint32_t mode_t;
 #define W_OK 2
 #define X_OK 1
 #define F_OK 0
+#define UMOUNT_NOFOLLOW 0x00000008
 
 #define STATX_TYPE        0x00000001U
 #define STATX_MODE        0x00000002U
@@ -444,12 +446,27 @@ static int64_t open_copied_path_at(int dirfd, const char *kpath, int flags)
 
             node = vfs_create_file(cleanpath, VFS_TYPE_FILE, 0, 0);
             if (node == 0) return -(int64_t)ENOMEM;
+            /* ponytail: vfs_create_file returns the existing node when the basename is
+             * already present (e.g. an attacker dropped a symlink between the resolve
+             * and the create). Reject the symlink so the create never lands on (or
+             * behind) an attacker-controlled path. */
+            if (node->type == VFS_TYPE_LINK) {
+                if (flags & O_EXCL) return -(int64_t)EEXIST;
+                return -(int64_t)ELOOP;
+            }
             node->mode = S_IFREG | ((0666 & ~proc->umask) & 07777);
             node->uid = proc->euid;
             node->gid = proc->egid;
         } else {
             return err;
         }
+    } else {
+        /* ponytail: O_EXCL|O_CREAT must fail if the path already exists;
+         * O_NOFOLLOW must fail if the basename is a symlink (don't open via it). */
+        if ((flags & (O_CREAT | O_EXCL)) == (O_CREAT | O_EXCL))
+            return -(int64_t)EEXIST;
+        if ((flags & O_NOFOLLOW) && node->type == VFS_TYPE_LINK)
+            return -(int64_t)ELOOP;
     }
 
     int access = node_required_access(flags, node);
@@ -1606,7 +1623,24 @@ int64_t sys_execve(struct syscall_frame *frame)
         return -(int64_t)EACCES;
     }
 
-    /* --- SetUID / SetGID Handling --- */
+    /* --- SetUID / SetGID Handling ---
+     * ponytail: AT_SECURE hardening.
+     *   - If SUID/SGID would actually change the effective ids, refuse
+     *     to exec when the caller can also write the file (TOCTOU pivot).
+     *   - Plumb the secure flag into the ELF loader so the dynamic linker
+     *     disables LD_AUDIT / LD_PRELOAD / LD_LIBRARY_PATH. */
+    int would_set_uid = (node->mode & S_ISUID) && (node->uid != proc->euid);
+    int would_set_gid = (node->mode & S_ISGID) && (node->gid != proc->egid);
+    int at_secure = 0;
+    if (would_set_uid || would_set_gid) {
+        if (vfs_check_permission(node, VFS_ACCESS_WRITE) == 0) {
+            for (int i = 0; i < envc; i++) kfree(kenvp[i]);
+            for (int i = 0; i < argc; i++) kfree(kargv[i]);
+            return -(int64_t)EACCES;
+        }
+        at_secure = 1;
+    }
+
     if (node->mode & S_ISUID) {
         proc->euid = node->uid;
         proc->suid = node->uid;
@@ -1615,6 +1649,7 @@ int64_t sys_execve(struct syscall_frame *frame)
         proc->egid = node->gid;
         proc->sgid = node->gid;
     }
+    proc->dumpable = !at_secure; /* ponytail: tie dumpable to AT_SECURE */
 
     /* --- Close FD_CLOEXEC descriptors --- */
     for (int i = 0; i < MAX_FILES_PER_PROCESS; i++) {
@@ -1647,7 +1682,7 @@ int64_t sys_execve(struct syscall_frame *frame)
 
     uint64_t entry = 0, rsp = 0;
     int load_err = elf_load_into_process(proc, elf_buf, node->size,
-                                          argc, kargv, kenvp, filename, &entry, &rsp);
+                                          argc, kargv, kenvp, filename, &entry, &rsp, at_secure);
     kfree(elf_buf);
     if (load_err != 0) {
         for (int i = 0; i < envc; i++) kfree(kenvp[i]);
@@ -1696,6 +1731,7 @@ struct pipe {
     struct wait_queue write_wq;
     int readers;
     int writers;
+    spinlock_t lock; /* ponytail: protects head/tail/count/readers/writers */
 };
 
 static int pipe_read(struct vfs_node *node, size_t offset, void *buf, size_t count)
@@ -1705,15 +1741,19 @@ static int pipe_read(struct vfs_node *node, size_t offset, void *buf, size_t cou
     if (p == 0) return -EINVAL;
 
     bool nonblock = (current_task && (current_task->current_file_flags & O_NONBLOCK));
+    uint64_t flags;
+    spin_lock_irqsave(&p->lock, &flags);
 
     while (p->count == 0) {
         if (p->writers == 0) {
+            spin_unlock_irqrestore(&p->lock, flags);
             return 0; // EOF
         }
         if (nonblock) {
+            spin_unlock_irqrestore(&p->lock, flags);
             return -EAGAIN;
         }
-        wait_queue_sleep(&p->read_wq);
+        wait_queue_sleep_locked(&p->read_wq);
     }
 
     size_t read_bytes = 0;
@@ -1727,6 +1767,7 @@ static int pipe_read(struct vfs_node *node, size_t offset, void *buf, size_t cou
 
     wait_queue_wake_all(&p->write_wq);
     io_event_notify();
+    spin_unlock_irqrestore(&p->lock, flags);
     return (int)read_bytes;
 }
 
@@ -1744,6 +1785,8 @@ static int pipe_write(struct vfs_node *node, size_t offset, const void *buf, siz
     }
 
     bool nonblock = (current_task && (current_task->current_file_flags & O_NONBLOCK));
+    uint64_t flags;
+    spin_lock_irqsave(&p->lock, &flags);
 
     size_t written_bytes = 0;
     const uint8_t *ubuf = buf;
@@ -1751,17 +1794,19 @@ static int pipe_write(struct vfs_node *node, size_t offset, const void *buf, siz
     while (count > 0) {
         while (p->count == PIPE_BUF_SIZE) {
             if (p->readers == 0) {
-                if (written_bytes > 0) return (int)written_bytes;
+                if (written_bytes > 0) { spin_unlock_irqrestore(&p->lock, flags); return (int)written_bytes; }
+                spin_unlock_irqrestore(&p->lock, flags);
                 if (current_task) {
                     task_send_signal(current_task, 13); // SIGPIPE
                 }
                 return -EPIPE;
             }
             if (nonblock) {
-                if (written_bytes > 0) return (int)written_bytes;
+                if (written_bytes > 0) { spin_unlock_irqrestore(&p->lock, flags); return (int)written_bytes; }
+                spin_unlock_irqrestore(&p->lock, flags);
                 return -EAGAIN;
             }
-            wait_queue_sleep(&p->write_wq);
+            wait_queue_sleep_locked(&p->write_wq);
         }
 
         size_t space = PIPE_BUF_SIZE - p->count;
@@ -1775,7 +1820,7 @@ static int pipe_write(struct vfs_node *node, size_t offset, const void *buf, siz
         wait_queue_wake_all(&p->read_wq);
         io_event_notify();
     }
-
+    spin_unlock_irqrestore(&p->lock, flags);
     return (int)written_bytes;
 }
 
@@ -1842,6 +1887,7 @@ int64_t sys_pipe2(struct syscall_frame *frame)
     struct pipe *p = kzalloc(sizeof(struct pipe));
     if (p == 0) return -(int64_t)ENOMEM;
 
+    spinlock_init(&p->lock, "pipe");
     wait_queue_init(&p->read_wq);
     wait_queue_init(&p->write_wq);
     p->readers = 1;
@@ -2054,10 +2100,44 @@ int64_t sys_poll(struct syscall_frame *frame)
 /* ------------------------------------------------------------------ */
 int64_t sys_mount(struct syscall_frame *frame)
 {
-    /* mount(source, target, fstype, mountflags, data) */
-    /* Stub: kernel-internal callers use vfs_mount() directly. */
-    (void)frame;
-    return 0;
+    const char *source = (const char *)frame->rdi;
+    const char *target = (const char *)frame->rsi;
+    const char *fstype = (const char *)frame->rdx;
+    char ktarget[PATH_MAX_LEN];
+    char kscratch[PATH_MAX_LEN];
+
+    if (!current_is_root()) return -(int64_t)EPERM;
+
+    if (copy_string_from_user(ktarget, target, sizeof(ktarget)) != 0) {
+        return -(int64_t)EFAULT;
+    }
+    ktarget[sizeof(ktarget) - 1] = '\0';
+    if (ktarget[0] != '/') return -(int64_t)EINVAL;
+
+    if (source != 0) {
+        if (copy_string_from_user(kscratch, source, sizeof(kscratch)) != 0) {
+            return -(int64_t)EFAULT;
+        }
+    }
+
+    if (fstype != 0) {
+        if (copy_string_from_user(kscratch, fstype, 32) != 0) {
+            return -(int64_t)EFAULT;
+        }
+    }
+
+    int err = 0;
+    struct vfs_node *target_node = vfs_resolve_path_at(vfs_get_root(), ktarget, true, &err);
+    if (target_node == 0) return err;
+    if (target_node->type != VFS_TYPE_DIR) return -(int64_t)ENOTDIR;
+
+    /*
+     * Kernel-internal setup uses vfs_mount() directly. Userspace-driven
+     * mount still needs device lookup, fs-specific superblock creation,
+     * propagation rules, and permission semantics, so report unsupported
+     * instead of pretending the mount happened.
+     */
+    return -(int64_t)ENOSYS;
 }
 
 /* ------------------------------------------------------------------ */
@@ -2065,6 +2145,25 @@ int64_t sys_mount(struct syscall_frame *frame)
 /* ------------------------------------------------------------------ */
 int64_t sys_umount2(struct syscall_frame *frame)
 {
-    (void)frame;
-    return 0;
+    const char *target = (const char *)frame->rdi;
+    int flags = (int)frame->rsi;
+    char ktarget[PATH_MAX_LEN];
+
+    if (!current_is_root()) return -(int64_t)EPERM;
+    if (flags & ~UMOUNT_NOFOLLOW) return -(int64_t)EINVAL;
+
+    if (copy_string_from_user(ktarget, target, sizeof(ktarget)) != 0) {
+        return -(int64_t)EFAULT;
+    }
+    ktarget[sizeof(ktarget) - 1] = '\0';
+    if (ktarget[0] != '/') return -(int64_t)EINVAL;
+
+    if (vfs_find_mount(ktarget) == 0) return -(int64_t)EINVAL;
+
+    /*
+     * Do not expose partial unmount semantics to userspace yet. Internal
+     * teardown can still call vfs_umount() directly when the caller owns
+     * the mount object lifecycle.
+     */
+    return -(int64_t)ENOSYS;
 }

@@ -14,7 +14,7 @@ Built with `zig cc -target x86_64-freestanding-none` + custom linker script.
 | `test_process`      | `getpid`, `gettid`, `uname`                              |
 | `test_clock`        | `clock_gettime(CLOCK_MONOTONIC)`, `clock_gettime(CLOCK_REALTIME)` |
 | `test_getrandom`    | `getrandom`                                              |
-| `test_all`          | All of the above in sequence; exits 0 on full pass       |
+| `test_all`          | All of the above plus `mount`/`umount2` error behavior; exits 0 on full pass |
 
 ## Building (on the host)
 
@@ -44,7 +44,7 @@ syscall
 
 ## Known Limitations
 
-- `mmap` only supports `MAP_ANONYMOUS|MAP_PRIVATE` (file-backed: `-ENOSYS`)
+- `mmap` supports anonymous and file-backed `MAP_PRIVATE`; `MAP_SHARED` validates basic errors, then returns `-ENOSYS`
 - `getrandom` uses a XorShift PRNG seeded from PIT ticks (not cryptographic)
 - `clock_gettime` resolution is ~10 ms (100 Hz PIT)
 - `uname` returns `LiteNix` / `0.1.0` / `x86_64`

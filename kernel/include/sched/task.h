@@ -87,6 +87,9 @@ struct process {
     uint32_t egid;  /* effective GID */
     uint32_t sgid;  /* saved set-GID */
 
+    /* ponytail: AT_SECURE flip — set when exec'ing a SUID/SGID image */
+    bool dumpable;
+
     /* Heap (brk) tracking */
     uint64_t heap_start;  /* set by ELF loader: page-aligned end of BSS */
     uint64_t heap_end;    /* current brk pointer */

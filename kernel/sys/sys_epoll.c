@@ -194,8 +194,17 @@ static int64_t do_select(int nfds, const kernel_fd_set_t *rfds, const kernel_fd_
         deadline = pit_ticks() + timeout_ticks;
     }
 
+    kernel_fd_set_t in_rfds, in_wfds, in_efds;
+    if (rfds) memcpy(&in_rfds, rfds, sizeof(kernel_fd_set_t));
+    if (wfds) memcpy(&in_wfds, wfds, sizeof(kernel_fd_set_t));
+    if (efds) memcpy(&in_efds, efds, sizeof(kernel_fd_set_t));
+
     for (;;) {
-        int count = scan_fd_sets(proc, nfds, rfds, wfds, efds, out_rfds, out_wfds, out_efds);
+        int count = scan_fd_sets(proc, nfds,
+                                 rfds ? &in_rfds : 0,
+                                 wfds ? &in_wfds : 0,
+                                 efds ? &in_efds : 0,
+                                 out_rfds, out_wfds, out_efds);
         if (count > 0) {
             return count;
         }

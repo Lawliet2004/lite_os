@@ -7,6 +7,7 @@
 #include <mm/heap.h>
 #include <mm/uaccess.h>
 #include <kernel/printk.h>
+#include <kernel/spinlock.h>
 
 #define AF_UNIX      1
 #define AF_INET      2
@@ -39,6 +40,7 @@ struct msghdr_linux {
 };
 
 struct socket socket_table[MAX_SOCKETS];
+spinlock_t socket_table_lock;
 
 // Forward declaration of file ops
 static int socket_read(struct vfs_node *node, size_t offset, void *buf, size_t count);
@@ -120,6 +122,8 @@ static int socket_alloc_common(int domain, int sock_type, int fd_flags, int *out
     if (fd < 0) return -EMFILE;
 
     struct socket *sock = 0;
+    uint64_t flags;
+    spin_lock_irqsave(&socket_table_lock, &flags);
     for (int i = 0; i < MAX_SOCKETS; i++) {
         if (!socket_table[i].valid) {
             sock = &socket_table[i];
@@ -130,6 +134,7 @@ static int socket_alloc_common(int domain, int sock_type, int fd_flags, int *out
             break;
         }
     }
+    spin_unlock_irqrestore(&socket_table_lock, flags);
     if (!sock) return -ENFILE;
 
     sock->rx_buf_size = 8192;
@@ -373,7 +378,12 @@ static int socket_close(struct vfs_node *node, struct file *f)
         kfree(sock->rx_buf);
         sock->rx_buf = NULL;
     }
-    sock->valid = false;
+    {
+        uint64_t flags;
+        spin_lock_irqsave(&socket_table_lock, &flags);
+        sock->valid = false;
+        spin_unlock_irqrestore(&socket_table_lock, flags);
+    }
     kfree(node);
     return 0;
 }
@@ -429,8 +439,13 @@ int64_t sys_bind(struct syscall_frame *frame)
     }
 
     uint16_t port = (sin.sin_port << 8) | (sin.sin_port >> 8);
-    sock->local_port = port;
-    sock->bound = true;
+    {
+        uint64_t flags;
+        spin_lock_irqsave(&socket_table_lock, &flags);
+        sock->local_port = port;
+        sock->bound = true;
+        spin_unlock_irqrestore(&socket_table_lock, flags);
+    }
     return 0;
 }
 
@@ -453,8 +468,12 @@ int64_t sys_listen(struct syscall_frame *frame)
 
     if (sock->domain != AF_INET) return -EAFNOSUPPORT;
     if (sock->type != SOCKET_TYPE_TCP) return -EOPNOTSUPP;
-
-    sock->tcp_state = TCP_STATE_LISTEN;
+    {
+        uint64_t flags;
+        spin_lock_irqsave(&socket_table_lock, &flags);
+        sock->tcp_state = TCP_STATE_LISTEN;
+        spin_unlock_irqrestore(&socket_table_lock, flags);
+    }
     return 0;
 }
 
@@ -481,15 +500,22 @@ int64_t sys_accept(struct syscall_frame *frame)
     if (addr && !uaccess_ok(addr, sizeof(struct sockaddr))) return -EFAULT;
     if (addrlen && !uaccess_ok(addrlen, sizeof(uint32_t))) return -EFAULT;
 
-    while (sock->accept_count == 0) {
+    struct socket *child = 0;
+    while (1) {
+        uint64_t flags;
+        spin_lock_irqsave(&socket_table_lock, &flags);
+        if (sock->accept_count > 0) {
+            child = sock->accept_queue[0];
+            for (int i = 1; i < sock->accept_count; i++) {
+                sock->accept_queue[i-1] = sock->accept_queue[i];
+            }
+            sock->accept_count--;
+            spin_unlock_irqrestore(&socket_table_lock, flags);
+            break;
+        }
+        spin_unlock_irqrestore(&socket_table_lock, flags);
         wait_queue_sleep(&sock->wait_q);
     }
-
-    struct socket *child = sock->accept_queue[0];
-    for (int i = 1; i < sock->accept_count; i++) {
-        sock->accept_queue[i-1] = sock->accept_queue[i];
-    }
-    sock->accept_count--;
 
     int child_fd = alloc_fd(proc);
     if (child_fd < 0) return -EMFILE;
@@ -583,19 +609,39 @@ int64_t sys_connect(struct syscall_frame *frame)
             sock->bound = true;
         }
 
-        sock->tcp_state = TCP_STATE_SYN_SENT;
-        sock->snd_nxt = 1000;
-        sock->rcv_nxt = 0;
+        {
+            uint64_t flags;
+            spin_lock_irqsave(&socket_table_lock, &flags);
+            sock->tcp_state = TCP_STATE_SYN_SENT;
+            sock->snd_nxt = 1000;
+            sock->rcv_nxt = 0;
+            spin_unlock_irqrestore(&socket_table_lock, flags);
+        }
 
         net_tcp_send_segment(sock, TCP_FLAG_SYN, 0, 0);
 
-        while (sock->tcp_state != TCP_STATE_ESTABLISHED) {
+        while (1) {
+            uint64_t flags;
+            spin_lock_irqsave(&socket_table_lock, &flags);
+            bool established = (sock->tcp_state == TCP_STATE_ESTABLISHED);
+            spin_unlock_irqrestore(&socket_table_lock, flags);
+            if (established) break;
             wait_queue_sleep(&sock->wait_q);
         }
-    sock->connected = true;
-    io_event_notify();
+        {
+            uint64_t flags;
+            spin_lock_irqsave(&socket_table_lock, &flags);
+            sock->connected = true;
+            spin_unlock_irqrestore(&socket_table_lock, flags);
+        }
+        io_event_notify();
     } else {
-        sock->connected = true;
+        {
+            uint64_t flags;
+            spin_lock_irqsave(&socket_table_lock, &flags);
+            sock->connected = true;
+            spin_unlock_irqrestore(&socket_table_lock, flags);
+        }
         io_event_notify();
     }
 
@@ -896,24 +942,29 @@ int64_t sys_shutdown(struct syscall_frame *frame)
     if (!sock->connected && sock->domain != AF_UNIX && sock->tcp_state != TCP_STATE_LISTEN)
         return -ENOTCONN;
 
-    if (how == SHUT_RD || how == SHUT_RDWR)
-        sock->shutdown_read = true;
-    if (how == SHUT_WR || how == SHUT_RDWR) {
-        sock->shutdown_write = true;
-        if (sock->peer) {
-            wait_queue_wake_all(&sock->peer->wait_q);
-        }
-        if (sock->type == SOCKET_TYPE_TCP) {
-            if (sock->tcp_state == TCP_STATE_ESTABLISHED || sock->tcp_state == TCP_STATE_SYN_RECEIVED) {
-                sock->tcp_state = TCP_STATE_FIN_WAIT_1;
-                net_tcp_send_segment(sock, TCP_FLAG_FIN | TCP_FLAG_ACK, 0, 0);
-            } else if (sock->tcp_state == TCP_STATE_CLOSE_WAIT) {
-                sock->tcp_state = TCP_STATE_LAST_ACK;
-                net_tcp_send_segment(sock, TCP_FLAG_FIN | TCP_FLAG_ACK, 0, 0);
+    {
+        uint64_t flags;
+        spin_lock_irqsave(&socket_table_lock, &flags);
+        if (how == SHUT_RD || how == SHUT_RDWR)
+            sock->shutdown_read = true;
+        if (how == SHUT_WR || how == SHUT_RDWR) {
+            sock->shutdown_write = true;
+            if (sock->peer) {
+                wait_queue_wake_all(&sock->peer->wait_q);
+            }
+            if (sock->type == SOCKET_TYPE_TCP) {
+                if (sock->tcp_state == TCP_STATE_ESTABLISHED || sock->tcp_state == TCP_STATE_SYN_RECEIVED) {
+                    sock->tcp_state = TCP_STATE_FIN_WAIT_1;
+                    net_tcp_send_segment(sock, TCP_FLAG_FIN | TCP_FLAG_ACK, 0, 0);
+                } else if (sock->tcp_state == TCP_STATE_CLOSE_WAIT) {
+                    sock->tcp_state = TCP_STATE_LAST_ACK;
+                    net_tcp_send_segment(sock, TCP_FLAG_FIN | TCP_FLAG_ACK, 0, 0);
+                }
             }
         }
+        wait_queue_wake_all(&sock->wait_q);
+        spin_unlock_irqrestore(&socket_table_lock, flags);
     }
-    wait_queue_wake_all(&sock->wait_q);
     return 0;
 }
 

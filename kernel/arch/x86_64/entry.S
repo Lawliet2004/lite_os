@@ -3,6 +3,7 @@ bits 64
 section .text
 global _start
 extern kernel_main
+global stack_top
 
 _start:
     cli

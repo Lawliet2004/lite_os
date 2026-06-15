@@ -57,5 +57,17 @@ volatile struct limine_kernel_file_request kernel_file_request = {
     .response = 0,
 };
 
+USED SECTION(".limine_requests")
+volatile struct limine_framebuffer_request framebuffer_request = {
+    .id = {
+        LIMINE_COMMON_MAGIC_0,
+        LIMINE_COMMON_MAGIC_1,
+        LIMINE_FRAMEBUFFER_REQUEST_ID_0,
+        LIMINE_FRAMEBUFFER_REQUEST_ID_1,
+    },
+    .revision = 0,
+    .response = 0,
+};
+
 USED SECTION(".limine_requests_end")
 static volatile uint64_t limine_requests_end_marker[2] = { 0, 0 };

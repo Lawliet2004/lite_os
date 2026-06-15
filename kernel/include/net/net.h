@@ -91,8 +91,13 @@ struct tcp_hdr {
 #define TCP_FLAG_ACK 0x10
 
 #include <sched/wait_queue.h>
+#include <kernel/spinlock.h>
 
 #define MAX_SOCKETS 64
+
+/* ponytail: single coarse-grained lock protecting the socket_table array
+ * and per-socket state. IRQ-safe. */
+extern spinlock_t socket_table_lock;
 
 #define SOCKET_TYPE_UDP 1
 #define SOCKET_TYPE_TCP 2
@@ -127,6 +132,8 @@ struct socket {
     uint32_t snd_nxt;
     uint32_t rcv_nxt;
     uint32_t snd_una;
+    uint64_t rtx_time;
+    uint32_t rtx_count;
 
     struct socket *parent_listener;
     struct socket *accept_queue[8];

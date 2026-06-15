@@ -3,26 +3,21 @@
 #include <kernel/compiler.h>
 #include <stdint.h>
 
-#define IDT_ENTRIES 256
 #define IDT_GATE_INTERRUPT 0x8E
 #define IDT_DOUBLE_FAULT_IST 1
 
-struct idt_entry {
-    uint16_t offset_low;
-    uint16_t selector;
-    uint8_t ist;
-    uint8_t type_attr;
-    uint16_t offset_mid;
-    uint32_t offset_high;
-    uint32_t zero;
-} PACKED;
+/* The idt_entry struct is now declared in idt.h so it can be used by
+ * other kernel files (notably smp.c, which needs its size to compute
+ * the IDT limit). */
 
 struct idtr {
     uint16_t limit;
     uint64_t base;
 } PACKED;
 
-static struct idt_entry idt[IDT_ENTRIES];
+/* idt[] is exposed (non-static) so the SMP AP startup code can read its
+ * base address when filling the trampoline parameters. */
+struct idt_entry idt[IDT_ENTRIES];
 
 extern void isr0(void);
 extern void isr1(void);
@@ -72,6 +67,11 @@ extern void irq12(void);
 extern void irq13(void);
 extern void irq14(void);
 extern void irq15(void);
+
+/* Phase 3d: IPI vectors. */
+extern void isr_ipi0(void);
+extern void isr_ipi1(void);
+extern void isr_ipi2(void);
 
 static void idt_set_gate(uint8_t vector, void (*handler)(void), uint8_t ist)
 {
@@ -142,6 +142,16 @@ void idt_init(void)
     idt_set_gate(45, irq13, 0);
     idt_set_gate(46, irq14, 0);
     idt_set_gate(47, irq15, 0);
+
+    /* Phase 3d: IPI vectors. 0x40 = reschedule, 0x41 = TLB shootdown,
+     * 0x42 = panic. The 16-bit GDT at offset 0x88 in the trampoline
+     * doesn't carry these (it's only for the AP's protected-mode
+     * transitions), so we don't need a per-CPU IPI gate. The shared
+     * IDT works because the handlers run with interrupts disabled
+     * anyway. */
+    idt_set_gate(0x40, isr_ipi0, 0);
+    idt_set_gate(0x41, isr_ipi1, 0);
+    idt_set_gate(0x42, isr_ipi2, 0);
 
     const struct idtr idtr = {
         .limit = sizeof(idt) - 1,

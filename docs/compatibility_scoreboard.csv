@@ -1,5 +1,5 @@
 binary_name,static_dynamic,libc_type,required_syscalls,pass_fail,last_verified,serial_evidence
-test_all,Static,None (Direct syscalls),write;exit_group;openat;read;close;newfstatat;brk;mmap;munmap;getpid;gettid;uname;clock_gettime;nanosleep;getrandom,PASS,2026-06-08,"RAWSYSCALL: all tests passed"
+test_all,Static,None (Direct syscalls),write;exit_group;openat;read;close;newfstatat;mount;umount2;brk;mmap;munmap;getpid;gettid;uname;clock_gettime;nanosleep;getrandom,PASS,2026-06-13,"RAWSYSCALL: all tests passed"
 hello_musl,Static,musl,writev;exit_group;readv,PASS,2026-06-08,"Hello from musl! argc = 3 argv[0] = /bin/hello_musl"
 test_write_exit,Static,None (Direct syscalls),write;exit_group,PASS,2026-06-08,test_write_exit marker in serial.log
 test_read,Static,None (Direct syscalls),read;close;exit_group,PASS,2026-06-08,test_read marker in serial.log

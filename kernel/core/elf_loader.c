@@ -94,14 +94,19 @@ extern void user_task_entry(void *arg);
 extern struct process *process_create_with_parent(struct process *parent);
 extern struct task *task_create_user_process(const char *name, struct process *proc, void (*entry)(void *));
 
-#define USER_STACK_PAGES 8          /* 32 KiB initial stack */
+#define USER_STACK_PAGES 64         /* 256 KiB initial stack (Phase 9 init
+                                     * has a ~38 KiB stack frame plus the
+                                     * in-line test fixtures, so the 32 KiB
+                                     * default from earlier phases is too
+                                     * tight). Bump to 64 pages until the
+                                     * test 22+ fixtures shrink. */
 #define USER_STACK_TOP   0x00007ffffffff000ULL
 #define MAX_STACK_ARGV   64
 
 static uint64_t setup_user_stack(struct address_space *space, int argc __attribute__((unused)),
                                   char **argv, char **envp, uint64_t entry_point __attribute__((unused)),
                                   uint64_t phdr_addr, int phnum, uint64_t interp_base,
-                                  uint64_t exec_entry, const char *exec_path)
+                                  uint64_t exec_entry, const char *exec_path, int at_secure)
 {
     const size_t stack_bytes = USER_STACK_PAGES * 4096;
     uint8_t *kbuf = kzalloc(stack_bytes);
@@ -184,7 +189,7 @@ static uint64_t setup_user_stack(struct address_space *space, int argc __attribu
     p[idx++] = AT_EUID;    p[idx++] = 0;
     p[idx++] = AT_GID;     p[idx++] = 0;
     p[idx++] = AT_EGID;    p[idx++] = 0;
-    p[idx++] = AT_SECURE;  p[idx++] = 0;
+    p[idx++] = AT_SECURE;  p[idx++] = (uint64_t)(at_secure ? 1 : 0);
     p[idx++] = AT_NULL;    p[idx++] = 0;
 
     /* Map stack pages */
@@ -205,7 +210,7 @@ static uint64_t setup_user_stack(struct address_space *space, int argc __attribu
 
 int elf_load_into_process(struct process *proc, const void *elf_data, size_t elf_size,
                            int argc, char **argv, char **envp, const char *exec_path,
-                           uint64_t *out_entry, uint64_t *out_rsp)
+                           uint64_t *out_entry, uint64_t *out_rsp, int at_secure)
 {
     int err_code = 0;
 
@@ -395,7 +400,7 @@ int elf_load_into_process(struct process *proc, const void *elf_data, size_t elf
     /* Setup stack */
     uint64_t user_rsp = setup_user_stack(new_space, argc, argv, envp, final_entry,
                                           phdr_addr, ehdr->e_phnum, interp_base,
-                                          load_base + ehdr->e_entry, exec_path);
+                                          load_base + ehdr->e_entry, exec_path, at_secure);
     if (user_rsp == 0) { err_code = -ENOMEM; goto error_cleanup; }
 
     /* Compute heap_start */
@@ -430,7 +435,7 @@ struct task *elf_load(const char *name, const void *elf_data, size_t elf_size, i
     if (proc == 0) return 0;
 
     uint64_t entry, rsp;
-    if (elf_load_into_process(proc, elf_data, elf_size, argc, argv, envp, name, &entry, &rsp) != 0) {
+    if (elf_load_into_process(proc, elf_data, elf_size, argc, argv, envp, name, &entry, &rsp, 0) != 0) {
         process_unlink_child(init_process, proc);
         kfree(proc);
         return 0;

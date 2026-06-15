@@ -2,6 +2,7 @@
 #include <sched/scheduler.h>
 #include <sched/wait_queue.h>
 #include <arch/x86_64/cpu.h>
+#include <arch/x86_64/gdt.h>
 #include <arch/x86_64/vmm.h>
 #include <mm/uaccess.h>
 #include <drivers/pit.h>
@@ -42,6 +43,7 @@ struct process *process_create_with_parent(struct process *parent)
     process->sid = process->pid;
     process->ruid = 0; process->euid = 0; process->suid = 0;
     process->rgid = 0; process->egid = 0; process->sgid = 0;
+    process->dumpable = true; /* ponytail: parentless (init) is dumpable by default */
 
     /* Default cwd to root */
     process->cwd[0] = '/';
@@ -55,6 +57,7 @@ struct process *process_create_with_parent(struct process *parent)
         process->sibling = parent->children;
         parent->children = process;
         process->umask = parent->umask;
+        process->dumpable = parent->dumpable; /* ponytail: AT_SECURE inherits across fork */
         if (parent->pid > 1) {
             process->pgid = parent->pgid;
             process->sid = parent->sid;
@@ -316,6 +319,9 @@ void task_exit(int exit_code)
             current_task->process->exited = true;
             current_task->process->exit_code = exit_code;
             process_reparent_children(current_task->process);
+            if (current_task->process->parent != 0 && current_task->process->parent->main_thread != 0) {
+                task_send_signal(current_task->process->parent->main_thread, 17); // SIGCHLD
+            }
         }
     }
 
@@ -682,6 +688,15 @@ struct task *task_fork(struct syscall_frame *parent_frame)
 
     // Copy parent VMAs to child
     memcpy(child_process->vmas, parent_process->vmas, sizeof(parent_process->vmas));
+    /* ponytail: shared file VMAs are referenced from both address spaces;
+     * the file's ref_count must reflect that, otherwise the parent's
+     * later munmap frees the file while the child still holds a pointer. */
+    for (uint32_t i = 0; i < VMA_MAX; i++) {
+        struct vma *cv = &child_process->vmas[i];
+        if (cv->valid && !cv->is_anonymous && cv->file != 0) {
+            cv->file->ref_count++;
+        }
+    }
 
 
     // 3. Allocate child task structure
@@ -875,6 +890,20 @@ void task_send_signal(struct task *task, int sig)
 
     bool was_enabled = save_interrupts_and_disable();
 
+    if (task->process != 0) {
+        struct sigaction_linux *act = &task->process->sigactions[sig];
+        if (act->sa_handler == (void *)1) { // SIG_IGN
+            restore_interrupts(was_enabled);
+            return;
+        }
+        if (act->sa_handler == (void *)0) { // SIG_DFL
+            if (sig == 17 || sig == 23 || sig == 28) { // SIGCHLD, SIGURG, SIGWINCH
+                restore_interrupts(was_enabled);
+                return;
+            }
+        }
+    }
+
     task->signal_pending |= (1ULL << sig);
 
     /* Wake up the task if it is sleeping on a wait queue */
@@ -1003,8 +1032,12 @@ void task_deliver_signals(struct syscall_frame *frame)
             sc->rsp = old_rsp;
             sc->rip = frame->rcx;   // saved RIP is in RCX on entry
             sc->eflags = frame->r11; // saved RFLAGS is in R11 on entry
-            sc->cs = 0x33;
-            sc->ss = 0x2b;
+            /* USER_CODE_RPL3 / USER_DATA_RPL3 from gdt.h. The hardcoded
+             * values were correct when the user segments were at
+             * 0x30/0x28; in the Phase 3b per-CPU TSS layout they moved
+             * to 0x20/0x18. */
+            sc->cs = USER_CODE_RPL3;
+            sc->ss = USER_DATA_RPL3;
 
             if (copy_to_user((void *)new_rsp, &kframe, sizeof(struct rt_sigframe)) != 0) {
                 printk("Signal: failed to copy sigframe to user stack\n");

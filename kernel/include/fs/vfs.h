@@ -12,12 +12,14 @@ typedef int64_t off_t;
 #define O_WRONLY    1
 #define O_RDWR      2
 #define O_CREAT     64      /* 0100 */
+#define O_EXCL      128     /* 0200 */
 #define O_TRUNC     512     /* 0200 */
 #define O_APPEND    1024    /* 0400 */
-#define O_NONBLOCK  2048    /* 01000 */
-#define O_CLOEXEC   524288  /* 02000000 */
+#define O_NONBLOCK  2048    /* 04000 */
+
 #define O_DIRECTORY 65536   /* 0200000 */
 #define O_NOFOLLOW  131072  /* 0400000 */
+#define O_CLOEXEC   524288  /* 02000000 */
 
 #define SEEK_SET 0
 #define SEEK_CUR 1

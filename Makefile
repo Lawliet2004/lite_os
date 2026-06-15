@@ -104,6 +104,9 @@ C_SOURCES := \
 	kernel/arch/x86_64/interrupt/interrupt.c \
 	kernel/arch/x86_64/interrupt/pic.c \
 	kernel/arch/x86_64/memory/vmm.c \
+	kernel/arch/x86_64/smp.c \
+	kernel/arch/x86_64/smp_stub.c \
+	kernel/kernel/spinlock.c \
 	kernel/drivers/pit.c \
 	kernel/mm/heap.c \
 	kernel/mm/pmm.c \
@@ -134,6 +137,8 @@ C_SOURCES := \
 	kernel/fs/block.c \
 	kernel/drivers/pci.c \
 	kernel/drivers/virtio_net.c \
+	kernel/drivers/framebuffer.c \
+	kernel/drivers/fbcon.c \
 	kernel/net/net.c \
 	kernel/net/eth.c \
 	kernel/net/arp.c \
@@ -201,6 +206,24 @@ $(BUILD_DIR)/%.o: %.S
 	@mkdir -p $(dir $@)
 	$(AS) $(ASFLAGS) $< -o $@
 
+# user/init/init.S is a legacy stub. Don't let the implicit %.o:%.S
+# rule (or its %:%.o linker sibling) match a stray copy of it and
+# produce a stub build/user/init.elf on top of the real one from
+# user/init/init.c. We force the real rule by listing init.c as a
+# prerequisite of any *.o that would otherwise be derivable from
+# init.S.
+#
+# Belt-and-braces: we also add FORCE as a prerequisite so that
+# even if someone reintroduces init.S with a newer mtime than
+# init.elf, the rebuild from init.c runs. The %.o:%.S pattern
+# would otherwise produce a build/user/init.o from init.S and
+# then the implicit %:%.o linker rule would build
+# build/user/init.elf from that .o, shadowing the real rule.
+.PHONY: FORCE
+$(BUILD_DIR)/user/init.elf: FORCE
+	@mkdir -p $(dir $@)
+	$(CC) $(USER_CFLAGS) -T user/user.ld -nostdlib -static user/init/init.c user/libc-lite/libc_lite.c -o $@
+
 $(BUILD_DIR)/kernel/core/user_binaries.o: $(BUILD_DIR)/user/test_read_kernel.elf $(BUILD_DIR)/user/test_privileged.elf $(BUILD_DIR)/user/init.elf
 
 $(BUILD_DIR)/kernel/fs/initramfs_binary.o: $(BUILD_DIR)/initramfs.tar
@@ -227,7 +250,7 @@ $(BUILD_DIR)/tests/userspace/dynamic-musl/.hello_dynamic_built: tests/userspace/
 	MSYS_NO_PATHCONV=1 $(PYTHON) scripts/patch_interpreter.py $(BUILD_DIR)/tests/userspace/dynamic-musl/hello_dynamic $(BUILD_DIR)/tests/userspace/dynamic-musl/invalid_interp /lib/ld-musl-x86_64.so.1 /hello.txt
 	@touch $@
 
-$(BUILD_DIR)/initramfs.tar: $(BUILD_DIR)/user/init.elf $(BUILD_DIR)/user/sh.elf $(RAWSYSCALL_TESTS) hello_musl $(BUILD_DIR)/tests/userspace/dynamic-musl/hello_dynamic $(BUILD_DIR)/tests/userspace/dynamic-musl/missing_interp $(BUILD_DIR)/tests/userspace/dynamic-musl/invalid_interp tests/userspace/busybox/busybox $(BUILD_DIR)/user/udp_echo.elf $(BUILD_DIR)/user/http_server.elf $(BUILD_DIR)/user/ifconfig.elf $(BUILD_DIR)/user/power.elf $(BUILD_DIR)/user/hello_pkg.elf $(BUILD_DIR)/user/compat_abi.elf $(BUILD_DIR)/user/lpkg.elf $(BUILD_DIR)/user/dnslookup.elf $(BUILD_DIR)/user/http_client.elf $(BUILD_DIR)/user/login.elf $(BUILD_DIR)/user/passwd.elf
+$(BUILD_DIR)/initramfs.tar: $(BUILD_DIR)/user/init.elf $(BUILD_DIR)/user/sh.elf $(RAWSYSCALL_TESTS) hello_musl $(BUILD_DIR)/tests/userspace/dynamic-musl/hello_dynamic $(BUILD_DIR)/tests/userspace/dynamic-musl/missing_interp $(BUILD_DIR)/tests/userspace/dynamic-musl/invalid_interp tests/userspace/busybox/busybox $(BUILD_DIR)/user/udp_echo.elf $(BUILD_DIR)/user/http_server.elf $(BUILD_DIR)/user/ifconfig.elf $(BUILD_DIR)/user/power.elf $(BUILD_DIR)/user/hello_pkg.elf $(BUILD_DIR)/user/compat_abi.elf $(BUILD_DIR)/user/lpkg.elf $(BUILD_DIR)/user/dnslookup.elf $(BUILD_DIR)/user/http_client.elf $(BUILD_DIR)/user/login.elf $(BUILD_DIR)/user/passwd.elf $(BUILD_DIR)/user/su.elf $(BUILD_DIR)/user/id.elf $(BUILD_DIR)/user/useradd.elf $(BUILD_DIR)/user/show_creds.elf $(BUILD_DIR)/user/dhcpcd.elf $(BUILD_DIR)/user/hostname.elf $(BUILD_DIR)/user/klogd.elf $(BUILD_DIR)/user/logger.elf $(BUILD_DIR)/user/svc.elf $(BUILD_DIR)/user/supervisor.elf
 	@mkdir -p $(BUILD_DIR)/initramfs-root/bin
 	@mkdir -p $(BUILD_DIR)/initramfs-root/sbin
 	@mkdir -p $(BUILD_DIR)/initramfs-root/etc
@@ -265,7 +288,7 @@ $(BUILD_DIR)/initramfs.tar: $(BUILD_DIR)/user/init.elf $(BUILD_DIR)/user/sh.elf 
 	@echo '  power shutdown' >> $(BUILD_DIR)/initramfs-root/etc/motd
 	@echo 'root:x:0:0:root:/home/root:/bin/sh' > $(BUILD_DIR)/initramfs-root/etc/passwd
 	@echo 'root:x:0:' > $(BUILD_DIR)/initramfs-root/etc/group
-	@echo 'root::0:0:99999:7:::' > $(BUILD_DIR)/initramfs-root/etc/shadow
+	@LITENIX_SALT_ROOT=L1teN1xS $(PYTHON) scripts/hash_password.py root=root > $(BUILD_DIR)/initramfs-root/etc/shadow
 	@echo '127.0.0.1 localhost' > $(BUILD_DIR)/initramfs-root/etc/hosts
 	@echo 'nameserver 8.8.8.8' > $(BUILD_DIR)/initramfs-root/etc/resolv.conf
 	@echo '/dev/hda /persist ext2 defaults 0 0' > $(BUILD_DIR)/initramfs-root/etc/fstab
@@ -314,6 +337,24 @@ $(BUILD_DIR)/initramfs.tar: $(BUILD_DIR)/user/init.elf $(BUILD_DIR)/user/sh.elf 
 	cp $(BUILD_DIR)/user/http_client.elf $(BUILD_DIR)/initramfs-root/bin/http_client
 	cp $(BUILD_DIR)/user/login.elf $(BUILD_DIR)/initramfs-root/bin/login
 	cp $(BUILD_DIR)/user/passwd.elf $(BUILD_DIR)/initramfs-root/bin/passwd
+	cp $(BUILD_DIR)/user/su.elf $(BUILD_DIR)/initramfs-root/bin/su
+	cp $(BUILD_DIR)/user/id.elf $(BUILD_DIR)/initramfs-root/bin/id
+	cp $(BUILD_DIR)/user/useradd.elf $(BUILD_DIR)/initramfs-root/sbin/useradd
+	cp $(BUILD_DIR)/user/show_creds.elf $(BUILD_DIR)/initramfs-root/tests/show_creds
+	cp $(BUILD_DIR)/user/dhcpcd.elf $(BUILD_DIR)/initramfs-root/sbin/dhcpcd
+	cp $(BUILD_DIR)/user/hostname.elf $(BUILD_DIR)/initramfs-root/bin/hostname
+	cp $(BUILD_DIR)/user/klogd.elf $(BUILD_DIR)/initramfs-root/sbin/klogd
+	cp $(BUILD_DIR)/user/logger.elf $(BUILD_DIR)/initramfs-root/bin/logger
+	cp $(BUILD_DIR)/user/svc.elf $(BUILD_DIR)/initramfs-root/sbin/svc
+	cp $(BUILD_DIR)/user/supervisor.elf $(BUILD_DIR)/initramfs-root/sbin/supervisor
+	mkdir -p $(BUILD_DIR)/initramfs-root/etc/services.available
+	cp user/udp_echo.conf   $(BUILD_DIR)/initramfs-root/etc/services.available/udp_echo.conf
+	cp user/http_server.conf $(BUILD_DIR)/initramfs-root/etc/services.available/http_server.conf
+	cp user/hostname.conf   $(BUILD_DIR)/initramfs-root/etc/services.available/hostname.conf
+	@echo 'udp_echo'   > $(BUILD_DIR)/initramfs-root/etc/services.enabled
+	@echo 'http_server' >> $(BUILD_DIR)/initramfs-root/etc/services.enabled
+	mkdir -p $(BUILD_DIR)/initramfs-root/run/services
+	mkdir -p $(BUILD_DIR)/initramfs-root/var/log/services
 	cp user/service.sh $(BUILD_DIR)/initramfs-root/sbin/service
 	cp user/installer.sh $(BUILD_DIR)/initramfs-root/sbin/litenix-install
 	cp user/rcS.sh $(BUILD_DIR)/initramfs-root/etc/init.d/rcS
@@ -340,10 +381,6 @@ $(BUILD_DIR)/initramfs.tar: $(BUILD_DIR)/user/init.elf $(BUILD_DIR)/user/sh.elf 
 	rm -rf $(BUILD_DIR)/testpkg-root
 	$(PYTHON) -c "import struct; f=open('$(BUILD_DIR)/initramfs-root/usr/share/packages/badpkg.lpkg', 'wb'); f.write(b'LPKG'); f.write(struct.pack('<I', 1)); f.write(struct.pack('<I', 15)); f.write(b'../traversal.txt'); f.write(struct.pack('<III', 0o755, 4, 0)); f.write(b'data')"
 	$(PYTHON) scripts/make_initramfs.py $(BUILD_DIR)/initramfs-root $(BUILD_DIR)/initramfs.tar
-
-$(BUILD_DIR)/user/init.elf: user/init/init.c user/libc-lite/libc_lite.c user/libc-lite/libc_lite.h user/user.ld
-	@mkdir -p $(dir $@)
-	$(CC) $(USER_CFLAGS) -T user/user.ld -nostdlib -static user/init/init.c user/libc-lite/libc_lite.c -o $@
 
 $(BUILD_DIR)/user/sh.elf: user/shell/sh.c user/libc-lite/libc_lite.c user/libc-lite/libc_lite.h user/user.ld
 	@mkdir -p $(dir $@)
@@ -392,6 +429,46 @@ $(BUILD_DIR)/user/login.elf: user/login.c user/libc-lite/libc_lite.c user/libc-l
 $(BUILD_DIR)/user/passwd.elf: user/passwd.c user/libc-lite/libc_lite.c user/libc-lite/libc_lite.h user/user.ld
 	@mkdir -p $(dir $@)
 	$(CC) $(USER_CFLAGS) -T user/user.ld -nostdlib -static user/passwd.c user/libc-lite/libc_lite.c -o $@
+
+$(BUILD_DIR)/user/su.elf: user/su.c user/libc-lite/libc_lite.c user/libc-lite/libc_lite.h user/user.ld
+	@mkdir -p $(dir $@)
+	$(CC) $(USER_CFLAGS) -T user/user.ld -nostdlib -static user/su.c user/libc-lite/libc_lite.c -o $@
+
+$(BUILD_DIR)/user/id.elf: user/id.c user/libc-lite/libc_lite.c user/libc-lite/libc_lite.h user/user.ld
+	@mkdir -p $(dir $@)
+	$(CC) $(USER_CFLAGS) -T user/user.ld -nostdlib -static user/id.c user/libc-lite/libc_lite.c -o $@
+
+$(BUILD_DIR)/user/useradd.elf: user/useradd.c user/libc-lite/libc_lite.c user/libc-lite/libc_lite.h user/user.ld
+	@mkdir -p $(dir $@)
+	$(CC) $(USER_CFLAGS) -T user/user.ld -nostdlib -static user/useradd.c user/libc-lite/libc_lite.c -o $@
+
+$(BUILD_DIR)/user/show_creds.elf: user/tests/show_creds.c user/libc-lite/libc_lite.c user/libc-lite/libc_lite.h user/user.ld
+	@mkdir -p $(dir $@)
+	$(CC) $(USER_CFLAGS) -T user/user.ld -nostdlib -static user/tests/show_creds.c user/libc-lite/libc_lite.c -o $@
+
+$(BUILD_DIR)/user/dhcpcd.elf: user/dhcpcd.c user/libc-lite/libc_lite.c user/libc-lite/libc_lite.h user/user.ld
+	@mkdir -p $(dir $@)
+	$(CC) $(USER_CFLAGS) -T user/user.ld -nostdlib -static user/dhcpcd.c user/libc-lite/libc_lite.c -o $@
+
+$(BUILD_DIR)/user/hostname.elf: user/hostname.c user/libc-lite/libc_lite.c user/libc-lite/libc_lite.h user/user.ld
+	@mkdir -p $(dir $@)
+	$(CC) $(USER_CFLAGS) -T user/user.ld -nostdlib -static user/hostname.c user/libc-lite/libc_lite.c -o $@
+
+$(BUILD_DIR)/user/klogd.elf: user/klogd.c user/libc-lite/libc_lite.c user/libc-lite/libc_lite.h user/user.ld
+	@mkdir -p $(dir $@)
+	$(CC) $(USER_CFLAGS) -T user/user.ld -nostdlib -static user/klogd.c user/libc-lite/libc_lite.c -o $@
+
+$(BUILD_DIR)/user/logger.elf: user/logger.c user/libc-lite/libc_lite.c user/libc-lite/libc_lite.h user/user.ld
+	@mkdir -p $(dir $@)
+	$(CC) $(USER_CFLAGS) -T user/user.ld -nostdlib -static user/logger.c user/libc-lite/libc_lite.c -o $@
+
+$(BUILD_DIR)/user/svc.elf: user/svc.c user/libc-lite/libc_lite.c user/libc-lite/libc_lite.h user/user.ld
+	@mkdir -p $(dir $@)
+	$(CC) $(USER_CFLAGS) -T user/user.ld -nostdlib -static user/svc.c user/libc-lite/libc_lite.c -o $@
+
+$(BUILD_DIR)/user/supervisor.elf: user/supervisor.c user/libc-lite/libc_lite.c user/libc-lite/libc_lite.h user/user.ld
+	@mkdir -p $(dir $@)
+	$(CC) $(USER_CFLAGS) -T user/user.ld -nostdlib -static user/supervisor.c user/libc-lite/libc_lite.c -o $@
 
 $(BUILD_DIR)/user/test_read_kernel.elf: user/tests/test_read_kernel.S user/user.ld
 	@mkdir -p $(dir $@)
@@ -447,7 +524,7 @@ $(PERSIST_IMG): $(ROOTFS_IMG)
 
 run-persistent: $(ISO) $(PERSIST_IMG)
 	@mkdir -p $(BUILD_DIR)
-	qemu-system-x86_64 -M pc -m 128M -cdrom $(ISO) -drive file=$(PERSIST_IMG),if=ide,format=raw \
+	qemu-system-x86_64 -M pc -m 128M -vga std -cdrom $(ISO) -drive file=$(PERSIST_IMG),if=ide,format=raw \
 		-serial file:$(SERIAL_LOG) -debugcon stdio -no-reboot -no-shutdown \
 		-netdev user,id=n0 -device virtio-net-pci,netdev=n0
 
@@ -463,14 +540,14 @@ verify-persistent:
 	@$(MAKE) iso $(DISK_IMG) $(PERSIST_IMG)
 	@echo "--- First Boot (Setup) ---"
 	@i=0; while [ $$i -lt 10 ]; do rm -f $(BUILD_DIR)/serial1.log && break; i=$$((i + 1)); sleep 1; done; test ! -e $(BUILD_DIR)/serial1.log
-	@(timeout -k 5s 60s qemu-system-x86_64 -M pc -m 128M -cdrom build/litenix.iso \
+	@(timeout -k 5s 60s qemu-system-x86_64 -M pc -m 128M -vga std -cdrom build/litenix.iso \
 		-serial file:build/serial1.log -debugcon stdio -no-reboot -no-shutdown -display none \
 		-netdev user,id=n0 -device virtio-net-pci,netdev=n0 \
 		-drive file=persist.img,if=ide,format=raw \
 		|| (status=$$?; git checkout boot/limine.conf; test $$status -eq 124 -o $$status -eq 137))
 	@echo "--- Second Boot (Verify) ---"
 	@i=0; while [ $$i -lt 10 ]; do rm -f $(SERIAL_LOG) && break; i=$$((i + 1)); sleep 1; done; test ! -e $(SERIAL_LOG)
-	@(timeout -k 5s 60s qemu-system-x86_64 -M pc -m 128M -cdrom build/litenix.iso \
+	@(timeout -k 5s 60s qemu-system-x86_64 -M pc -m 128M -vga std -cdrom build/litenix.iso \
 		-serial file:build/serial.log -debugcon stdio -no-reboot -no-shutdown -display none \
 		-netdev user,id=n0 -device virtio-net-pci,netdev=n0 \
 		-drive file=persist.img,if=ide,format=raw \
@@ -482,7 +559,7 @@ verify-persistent:
 
 run: $(ISO) $(DISK_IMG)
 	@mkdir -p $(BUILD_DIR)
-	qemu-system-x86_64 -M pc -m 128M -cdrom $(ISO) -drive file=$(DISK_IMG),if=ide,format=raw \
+	qemu-system-x86_64 -M pc -m 128M -vga std -cdrom $(ISO) -drive file=$(DISK_IMG),if=ide,format=raw \
 		-serial file:$(SERIAL_LOG) -debugcon stdio -no-reboot -no-shutdown \
 		-netdev user,id=n0 -device virtio-net-pci,netdev=n0
 
@@ -491,7 +568,7 @@ run: $(ISO) $(DISK_IMG)
 define boot-and-capture
 	@mkdir -p $(BUILD_DIR)
 	@i=0; while [ $$i -lt 10 ]; do rm -f $(1) && break; i=$$((i + 1)); sleep 1; done; test ! -e $(1)
-	@(timeout -k 5s 60s qemu-system-x86_64 -M pc -m 128M -cdrom $(ISO) \
+	@(timeout -k 10s 600s qemu-system-x86_64 -M pc -m 128M -vga std -cdrom $(ISO) \
 		-serial file:$(1) -debugcon stdio -no-reboot -no-shutdown -display none \
 		-netdev user,id=n0 -device virtio-net-pci,netdev=n0 \
 		-drive file=$(DISK_IMG),if=ide,format=raw \
@@ -542,6 +619,7 @@ verify-boot:
 	sleep 2
 	mkdir -p $(BUILD_DIRS)
 	sleep 1
+	rm -f $(DISK_IMG) $(ROOTFS_IMG)
 	$(MAKE) iso $(DISK_IMG)
 	$(call boot-and-capture,$(SERIAL_LOG))
 	@grep -q "VMM: address-space self-test passed" $(SERIAL_LOG)
@@ -563,6 +641,11 @@ verify-boot:
 	@grep -q "COMPAT_ABI: all tests passed" $(SERIAL_LOG)
 	@grep -q "ROOTFS_LAYOUT: all tests passed" $(SERIAL_LOG)
 	@grep -q "INIT_SYSTEM: all tests passed" $(SERIAL_LOG)
+	@grep -q "USER_MGMT: all tests passed" $(SERIAL_LOG)
+	@grep -q "PERM_ENFORCE: all tests passed" $(SERIAL_LOG)
+	@grep -q "NET_BOOT: all tests passed" $(SERIAL_LOG)
+	@grep -q "SYSLOG: all tests passed" $(SERIAL_LOG)
+	@grep -q "SUPERVISOR: all tests passed" $(SERIAL_LOG)
 	@grep -q "All shell tests PASSED" $(SERIAL_LOG)
 	@grep -q "Phase 2: /tests/test_credentials PASSED" $(SERIAL_LOG)
 	@grep -q "Phase 2: /tests/test_epoll PASSED" $(SERIAL_LOG)
@@ -669,7 +752,7 @@ verify-lpkg: verify-boot
 	@echo "Compatibility lpkg verified via verify-boot"
 
 debug-gdb: $(ISO)
-	qemu-system-x86_64 -M pc -m 128M -cdrom $(ISO) -drive file=$(DISK_IMG),if=ide,format=raw \
+	qemu-system-x86_64 -M pc -m 128M -vga std -cdrom $(ISO) -drive file=$(DISK_IMG),if=ide,format=raw \
 		-serial file:$(SERIAL_LOG) -S -s -no-reboot -no-shutdown
 
 clean:
